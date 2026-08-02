@@ -81,7 +81,16 @@ func newOffer(t *testing.T, opus, video bool) offerFixture {
 	if video {
 		if err := mediaEngine.RegisterCodec(webrtc.RTPCodecParameters{
 			RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8, ClockRate: 90000},
-			PayloadType:        96,
+			PayloadType:        102,
+		}, webrtc.RTPCodecTypeVideo); err != nil {
+			t.Fatal(err)
+		}
+		if err := mediaEngine.RegisterCodec(webrtc.RTPCodecParameters{
+			RTPCodecCapability: webrtc.RTPCodecCapability{
+				MimeType: webrtc.MimeTypeH264, ClockRate: 90000,
+				SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
+			},
+			PayloadType: 112,
 		}, webrtc.RTPCodecTypeVideo); err != nil {
 			t.Fatal(err)
 		}
@@ -227,6 +236,10 @@ func TestNewSessionRejectsDisabledOpusAudioSection(t *testing.T) {
 
 func TestNewSessionKeepsAudioWhenOfferContainsVideo(t *testing.T) {
 	fixture := newOffer(t, true, true)
+	offerVideoLine := mediaLine(t, fixture.offer, "video")
+	if formats := strings.Fields(offerVideoLine)[3:]; !equalStrings(formats, []string{"102", "112"}) {
+		t.Fatalf("Alexa mixed offer video payloads = %v, want [102 112]", formats)
+	}
 	session, answer, err := newTestServer(t).NewSession(context.Background(), "mixed", fixture.offer, func() {})
 	if err != nil {
 		t.Fatal(err)
@@ -236,9 +249,138 @@ func TestNewSessionKeepsAudioWhenOfferContainsVideo(t *testing.T) {
 	if !strings.Contains(lower, "m=audio") || !strings.Contains(lower, "opus/48000") {
 		t.Fatalf("audio was not accepted:\n%s", answer)
 	}
-	if !strings.Contains(lower, "m=video 0") {
-		t.Fatalf("video m-line was not rejected:\n%s", answer)
+	videoSection := mediaSection(t, answer, "video")
+	videoFields := strings.Fields(strings.SplitN(videoSection, "\r\n", 2)[0])
+	if len(videoFields) != 4 || videoFields[1] != "0" || videoFields[3] != "102" {
+		t.Fatalf("Alexa rejected video m-line = %q, want port 0 and sole offered payload 102", videoFields)
 	}
+	if !strings.Contains(videoSection, "\r\na=inactive\r\n") {
+		t.Fatalf("Alexa rejected video section is not inactive:\n%s", videoSection)
+	}
+	for _, sender := range session.peer.GetSenders() {
+		if track := sender.Track(); track != nil && track.Kind() == webrtc.RTPCodecTypeVideo {
+			t.Fatal("Alexa normalization unexpectedly added an active local video track")
+		}
+	}
+}
+
+func TestAlexaRejectedVideoPayloadNormalizationPreservesAudioAndCandidates(t *testing.T) {
+	offer := strings.Join([]string{
+		"v=0",
+		"o=- 1 1 IN IP4 0.0.0.0",
+		"s=-",
+		"t=0 0",
+		"a=group:BUNDLE 0 1",
+		"m=audio 9 UDP/TLS/RTP/SAVPF 111",
+		"c=IN IP4 0.0.0.0",
+		"a=mid:0",
+		"a=rtpmap:111 opus/48000/2",
+		"m=video 9 UDP/TLS/RTP/SAVPF 102 112",
+		"c=IN IP4 0.0.0.0",
+		"a=mid:1",
+		"a=rtpmap:102 VP8/90000",
+		"a=rtpmap:112 H264/90000",
+		"",
+	}, "\r\n")
+	rawAnswer := strings.Join([]string{
+		"v=0",
+		"o=- 2 2 IN IP4 0.0.0.0",
+		"s=-",
+		"t=0 0",
+		"a=group:BUNDLE 0 1",
+		"m=audio 40000 UDP/TLS/RTP/SAVPF 111",
+		"c=IN IP4 8.8.8.8",
+		"a=mid:0",
+		"a=ice-ufrag:answerUfrag",
+		"a=ice-pwd:answerPassword",
+		"a=fingerprint:sha-256 AA:BB:CC",
+		"a=setup:active",
+		"a=candidate:1 1 UDP 2130706431 8.8.8.8 40000 typ host",
+		"a=rtpmap:111 opus/48000/2",
+		"a=sendrecv",
+		"m=video  0  UDP/TLS/RTP/SAVPF  0",
+		"c=IN IP4 0.0.0.0",
+		"a=mid:1",
+		"a=ice-ufrag:answerUfrag",
+		"a=ice-pwd:answerPassword",
+		"a=fingerprint:sha-256 AA:BB:CC",
+		"a=setup:active",
+		"a=recvonly",
+		"",
+	}, "\r\n")
+
+	normalized := normalizeAlexaRejectedVideoPayloads(offer, rawAnswer)
+	if got := mediaLine(t, normalized, "video"); got != "m=video  0  UDP/TLS/RTP/SAVPF  102" {
+		t.Fatalf("normalized video m-line = %q", got)
+	}
+	if !strings.Contains(mediaSection(t, normalized, "video"), "\r\na=inactive\r\n") {
+		t.Fatalf("normalized video section is not inactive:\n%s", normalized)
+	}
+	if got, want := mediaSection(t, normalized, "audio"), mediaSection(t, rawAnswer, "audio"); got != want {
+		t.Fatalf("audio section changed during Alexa normalization\nwant:\n%s\ngot:\n%s", want, got)
+	}
+	if got, want := linesWithPrefix(normalized, "a=candidate:"), linesWithPrefix(rawAnswer, "a=candidate:"); !equalStrings(got, want) {
+		t.Fatalf("candidate lines changed during Alexa normalization: got %v want %v", got, want)
+	}
+	expected := strings.Replace(rawAnswer, "m=video  0  UDP/TLS/RTP/SAVPF  0", "m=video  0  UDP/TLS/RTP/SAVPF  102", 1)
+	expected = strings.Replace(expected, "a=recvonly", "a=inactive", 1)
+	if normalized != expected {
+		t.Fatalf("Alexa normalization changed unrelated SDP\nwant:\n%s\ngot:\n%s", expected, normalized)
+	}
+
+	fallbackOffer := strings.Replace(offer, "m=video 9 UDP/TLS/RTP/SAVPF 102 112", "m=video 9 UDP/TLS/RTP/SAVPF 112", 1)
+	emptyPayloadAnswer := strings.Replace(rawAnswer, "m=video  0  UDP/TLS/RTP/SAVPF  0", "m=video  0  UDP/TLS/RTP/SAVPF", 1)
+	fallback := normalizeAlexaRejectedVideoPayloads(fallbackOffer, emptyPayloadAnswer)
+	if got := mediaLine(t, fallback, "video"); got != "m=video  0  UDP/TLS/RTP/SAVPF 112" {
+		t.Fatalf("fallback video m-line = %q, want first offered payload 112", got)
+	}
+}
+
+func mediaLine(t *testing.T, raw, kind string) string {
+	t.Helper()
+	prefix := "m=" + kind + " "
+	for _, line := range strings.Split(raw, "\r\n") {
+		if strings.HasPrefix(line, prefix) {
+			return line
+		}
+	}
+	t.Fatalf("SDP missing %s m-line", kind)
+	return ""
+}
+
+func mediaSection(t *testing.T, raw, kind string) string {
+	t.Helper()
+	start := strings.Index(raw, "m="+kind+" ")
+	if start < 0 {
+		t.Fatalf("SDP missing %s media section", kind)
+	}
+	rest := raw[start:]
+	if next := strings.Index(rest[2:], "\r\nm="); next >= 0 {
+		return rest[:next+2]
+	}
+	return rest
+}
+
+func linesWithPrefix(raw, prefix string) []string {
+	var matches []string
+	for _, line := range strings.Split(raw, "\r\n") {
+		if strings.HasPrefix(line, prefix) {
+			matches = append(matches, line)
+		}
+	}
+	return matches
+}
+
+func equalStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestNewSessionHonorsCanceledContext(t *testing.T) {

@@ -154,13 +154,134 @@ func (s *Server) NewSession(ctx context.Context, id, offer string, onTerminal fu
 			_ = session.Close()
 			return nil, "", errors.New("local description missing after ICE gathering")
 		}
-		s.logger.Info("sdp_answer_generated", "sessionId", id, "offerBytes", len(offer), "answerBytes", len(local.SDP))
+		normalizedAnswer := normalizeAlexaRejectedVideoPayloads(offer, local.SDP)
+		s.logger.Info("sdp_answer_generated", "sessionId", id, "offerBytes", len(offer), "answerBytes", len(normalizedAnswer))
 		s.logger.Info("session_created", "sessionId", id)
-		return session, local.SDP, nil
+		return session, normalizedAnswer, nil
 	case <-deadlineCtx.Done():
 		_ = session.Close()
 		return nil, "", fmt.Errorf("%w: %v", ErrAnswerTimeout, deadlineCtx.Err())
 	}
+}
+
+// normalizeAlexaRejectedVideoPayloads is an Alexa interoperability boundary,
+// not generic SDP normalization.
+func normalizeAlexaRejectedVideoPayloads(offer, answer string) string {
+	offeredPayloads := alexaOfferedVideoPayloads(offer)
+	if len(offeredPayloads) == 0 {
+		return answer
+	}
+
+	lineSeparator := "\n"
+	if strings.Contains(answer, "\r\n") {
+		lineSeparator = "\r\n"
+	}
+	lines := strings.Split(answer, lineSeparator)
+	videoIndex := 0
+	for lineIndex := 0; lineIndex < len(lines); lineIndex++ {
+		if !strings.HasPrefix(lines[lineIndex], "m=video ") {
+			continue
+		}
+		payload := ""
+		if videoIndex < len(offeredPayloads) {
+			payload = offeredPayloads[videoIndex]
+		}
+		videoIndex++
+
+		normalizedLine, eligible := normalizeAlexaRejectedVideoMLine(lines[lineIndex], payload)
+		if !eligible {
+			continue
+		}
+		lines[lineIndex] = normalizedLine
+
+		sectionEnd := lineIndex + 1
+		for sectionEnd < len(lines) && !strings.HasPrefix(lines[sectionEnd], "m=") {
+			sectionEnd++
+		}
+		hasDirection := false
+		for sectionLine := lineIndex + 1; sectionLine < sectionEnd; sectionLine++ {
+			switch lines[sectionLine] {
+			case "a=inactive":
+				hasDirection = true
+			case "a=sendrecv", "a=sendonly", "a=recvonly":
+				lines[sectionLine] = "a=inactive"
+				hasDirection = true
+			}
+		}
+		if !hasDirection {
+			insertAt := sectionEnd
+			if insertAt == len(lines) && insertAt > 0 && lines[insertAt-1] == "" {
+				insertAt--
+			}
+			lines = append(lines, "")
+			copy(lines[insertAt+1:], lines[insertAt:])
+			lines[insertAt] = "a=inactive"
+			lineIndex++
+		}
+	}
+	return strings.Join(lines, lineSeparator)
+}
+
+func normalizeAlexaRejectedVideoMLine(line, payload string) (string, bool) {
+	if payload == "" {
+		return line, false
+	}
+	spans := sdpFieldSpans(line)
+	if len(spans) < 3 || len(spans) > 4 || line[spans[0][0]:spans[0][1]] != "m=video" || line[spans[1][0]:spans[1][1]] != "0" {
+		return line, false
+	}
+	if len(spans) == 4 {
+		if line[spans[3][0]:spans[3][1]] != "0" {
+			return line, false
+		}
+		return line[:spans[3][0]] + payload + line[spans[3][1]:], true
+	}
+	separator := " "
+	if trailingWhitespace := line[spans[2][1]:]; trailingWhitespace != "" {
+		separator = trailingWhitespace
+	}
+	return line[:spans[2][1]] + separator + payload, true
+}
+
+func sdpFieldSpans(line string) [][2]int {
+	var spans [][2]int
+	for index := 0; index < len(line); {
+		for index < len(line) && (line[index] == ' ' || line[index] == '\t') {
+			index++
+		}
+		if index == len(line) {
+			break
+		}
+		start := index
+		for index < len(line) && line[index] != ' ' && line[index] != '\t' {
+			index++
+		}
+		spans = append(spans, [2]int{start, index})
+	}
+	return spans
+}
+
+func alexaOfferedVideoPayloads(offer string) []string {
+	var payloads []string
+	for _, line := range strings.Split(strings.ReplaceAll(offer, "\r\n", "\n"), "\n") {
+		if !strings.HasPrefix(line, "m=video ") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			payloads = append(payloads, "")
+			continue
+		}
+		selected := fields[3]
+		for _, payload := range fields[3:] {
+			if payload == "102" {
+				selected = payload
+				break
+			}
+		}
+		payloads = append(payloads, selected)
+	}
+	return payloads
 }
 
 func validateOffer(raw string) error {
