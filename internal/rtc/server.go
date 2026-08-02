@@ -26,6 +26,7 @@ type Options struct {
 	PublicIP        net.IP
 	UDPPortMin      uint16
 	UDPPortMax      uint16
+	ICELite         bool
 	Recordings      recording.Factory
 	Logger          *slog.Logger
 	AnswerTimeout   time.Duration
@@ -74,6 +75,9 @@ func NewServer(opts Options) (*Server, error) {
 	settings := webrtc.SettingEngine{}
 	settings.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
 	settings.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
+	if opts.ICELite {
+		settings.SetLite(true)
+	}
 	if err := settings.SetEphemeralUDPPortRange(opts.UDPPortMin, opts.UDPPortMax); err != nil {
 		return nil, fmt.Errorf("set UDP port range: %w", err)
 	}

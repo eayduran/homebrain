@@ -30,6 +30,7 @@ type Config struct {
 	RecordingsDir   string
 	SessionTTL      time.Duration
 	LogLevel        slog.Level
+	ICELite         bool
 }
 
 func Load(getenv func(string) string) (Config, error) {
@@ -73,6 +74,10 @@ func Load(getenv func(string) string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	iceLite, err := parseBool(getenv("ICE_LITE"), "ICE_LITE")
+	if err != nil {
+		return Config{}, err
+	}
 
 	return Config{
 		HTTPAddr:        valueOr(getenv("HTTP_ADDR"), defaultHTTPAddr),
@@ -83,6 +88,7 @@ func Load(getenv func(string) string) (Config, error) {
 		RecordingsDir:   recordingsDir,
 		SessionTTL:      ttl,
 		LogLevel:        level,
+		ICELite:         iceLite,
 	}, nil
 }
 
@@ -102,6 +108,17 @@ func parsePort(raw string, fallback uint16, name string) (uint16, error) {
 		return 0, fmt.Errorf("%s must be an integer between 1 and 65535", name)
 	}
 	return uint16(value), nil
+}
+
+func parseBool(raw, name string) (bool, error) {
+	if raw == "" {
+		return false, nil
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("%s must be true or false", name)
+	}
+	return value, nil
 }
 
 var nonPublicIPv4Prefixes = []netip.Prefix{

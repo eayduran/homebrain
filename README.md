@@ -46,12 +46,15 @@ Tüm `/v1` istekleri `Authorization: Bearer <SESSION_API_TOKEN>` gerektirir. Bod
 | `PUBLIC_IP` | Yok | Zorunlu, gerçekten public ve route edilebilir IPv4 |
 | `UDP_PORT_MIN` | `40000` | ICE UDP alt portu |
 | `UDP_PORT_MAX` | `40020` | ICE UDP üst portu |
+| `ICE_LITE` | `false` | Opt-in Alexa ICE-Lite uyumluluk deneyi |
 | `SESSION_API_TOKEN` | Yok | Zorunlu güçlü bearer token |
 | `RECORDINGS_DIR` | `/data/recordings` | Yazılabilir OGG dizini |
 | `SESSION_TTL` | `10m` | Otomatik oturum cleanup süresi |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 
 Servis başlangıçta public IPv4'ü, port sırasını, token'ı, TTL'yi ve kayıt dizininin oluşturulup yazılabilir olmasını doğrular. `.env.example` içindeki `203.0.113.10` RFC 5737 dokümantasyon adresidir ve servis tarafından bilerek reddedilir; gerçek VPS IPv4'ünüzle değiştirin.
+
+`ICE_LITE` varsayılan olarak kesinlikle kapalıdır ve normal full-ICE davranışı korunur. Yalnız Alexa cihaz/firmware birlikte çalışabilirliğini denemek için deployment `.env` dosyasında açıkça `ICE_LITE=true` ayarlayın. Bu seçenek genel SDP veya ağ davranışı önerisi değildir.
 
 Token üretin:
 
@@ -75,6 +78,7 @@ Yapılandırıp başlatın:
 ```bash
 cp .env.example .env
 # .env içindeki PUBLIC_IP ve SESSION_API_TOKEN değerlerini değiştirin
+# Alexa ICE-Lite deneyi gerekiyorsa ayrıca ICE_LITE=true ayarlayın
 docker compose up -d --build
 curl http://VPS_PUBLIC_IP:8080/healthz
 ```
@@ -178,6 +182,7 @@ docker compose config
 - `SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})`
 - `SetEphemeralUDPPortRange(UDP_PORT_MIN, UDP_PORT_MAX)`
 - `SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)`
+- Yalnız `ICE_LITE=true` ise `SetLite(true)`; varsayılan full ICE'dır
 - `SetICEAddressRewriteRules` ile host candidate'ı `PUBLIC_IP` değerine `ICEAddressRewriteReplace`
 - Deprecated `SetNAT1To1IPs` kullanılmaz
 - `GatheringCompletePromise` ile non-trickle complete answer

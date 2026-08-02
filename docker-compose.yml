@@ -16,6 +16,8 @@ services:
         condition: service_completed_successfully
     env_file:
       - .env
+    environment:
+      ICE_LITE: "${ICE_LITE:-false}"
     ports:
       - "8080:8080/tcp"
       - "40000-40020:40000-40020/udp"

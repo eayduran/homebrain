@@ -145,11 +145,16 @@ func newTestServer(t *testing.T) *Server {
 }
 
 func newServerFor(t *testing.T, publicIP, recordingsDir string, disconnectGrace time.Duration) *Server {
+	return newServerWithICELiteFor(t, publicIP, recordingsDir, disconnectGrace, false)
+}
+
+func newServerWithICELiteFor(t *testing.T, publicIP, recordingsDir string, disconnectGrace time.Duration, iceLite bool) *Server {
 	t.Helper()
 	server, err := NewServer(Options{
 		PublicIP:        net.ParseIP(publicIP),
 		UDPPortMin:      50000,
 		UDPPortMax:      50100,
+		ICELite:         iceLite,
 		Recordings:      recording.NewFactory(recordingsDir, time.Now),
 		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 		AnswerTimeout:   2 * time.Second,
@@ -159,6 +164,132 @@ func newServerFor(t *testing.T, publicIP, recordingsDir string, disconnectGrace 
 		t.Fatal(err)
 	}
 	return server
+}
+
+func TestNewSessionICELiteModes(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		iceLite bool
+	}{
+		{name: "normal", iceLite: false},
+		{name: "Alexa ICE-Lite experiment", iceLite: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newOffer(t, true, true)
+			server := newServerWithICELiteFor(t, "8.8.8.8", t.TempDir(), 50*time.Millisecond, tt.iceLite)
+			session, answer, err := server.NewSession(context.Background(), "ice-mode", fixture.offer, func() {})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = session.Close() })
+
+			lower := strings.ToLower(answer)
+			if got := strings.Contains(lower, "a=ice-lite"); got != tt.iceLite {
+				t.Fatalf("a=ice-lite present = %t, want %t\n%s", got, tt.iceLite, answer)
+			}
+			if strings.Contains(lower, "a=ice-options:trickle") {
+				t.Fatalf("answer advertises trickle ICE:\n%s", answer)
+			}
+			if !tt.iceLite {
+				return
+			}
+			for _, want := range []string{"m=audio", "opus/48000", "a=candidate:", "8.8.8.8"} {
+				if !strings.Contains(lower, want) {
+					t.Fatalf("ICE-Lite answer missing %q:\n%s", want, answer)
+				}
+			}
+			videoSection := mediaSection(t, answer, "video")
+			videoFields := strings.Fields(strings.SplitN(videoSection, "\r\n", 2)[0])
+			if len(videoFields) != 4 || videoFields[1] != "0" || videoFields[3] != "102" {
+				t.Fatalf("ICE-Lite rejected video m-line = %q, want port 0 and payload 102", videoFields)
+			}
+			if !strings.Contains(videoSection, "\r\na=inactive\r\n") {
+				t.Fatalf("ICE-Lite rejected video section is not inactive:\n%s", videoSection)
+			}
+		})
+	}
+}
+
+func TestICELitePeerConnectionConnectsAndClosesCleanly(t *testing.T) {
+	fixture := newOffer(t, true, false)
+	server := newServerWithICELiteFor(t, localReachableIPv4(t), t.TempDir(), 50*time.Millisecond, true)
+	session, answer, err := server.NewSession(context.Background(), "ice-lite-connect", fixture.offer, func() {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+
+	connectAnswer(t, fixture.peer, answer)
+	waitForPeerEstablished(t, "full offerer", fixture.peer)
+	waitForPeerEstablished(t, "ICE-Lite answerer", session.peer)
+
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.peer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	waitForPeerClosed(t, "full offerer", fixture.peer)
+	waitForPeerClosed(t, "ICE-Lite answerer", session.peer)
+}
+
+func localReachableIPv4(t *testing.T) string {
+	t.Helper()
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, networkInterface := range interfaces {
+		if networkInterface.Flags&net.FlagUp == 0 || networkInterface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addresses, addressErr := networkInterface.Addrs()
+		if addressErr != nil {
+			continue
+		}
+		for _, address := range addresses {
+			var ip net.IP
+			switch value := address.(type) {
+			case *net.IPNet:
+				ip = value.IP
+			case *net.IPAddr:
+				ip = value.IP
+			}
+			if ipv4 := ip.To4(); ipv4 != nil && !ipv4.IsLoopback() && !ipv4.IsUnspecified() && !ipv4.IsLinkLocalUnicast() {
+				return ipv4.String()
+			}
+		}
+	}
+	t.Fatal("no active non-loopback IPv4 interface is available for the local ICE-Lite integration test")
+	return ""
+}
+
+func waitForPeerEstablished(t *testing.T, name string, peer *webrtc.PeerConnection) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		peerState := peer.ConnectionState()
+		iceState := peer.ICEConnectionState()
+		if peerState == webrtc.PeerConnectionStateConnected ||
+			iceState == webrtc.ICEConnectionStateConnected ||
+			iceState == webrtc.ICEConnectionStateCompleted {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("%s did not establish; peer=%s ICE=%s", name, peer.ConnectionState(), peer.ICEConnectionState())
+}
+
+func waitForPeerClosed(t *testing.T, name string, peer *webrtc.PeerConnection) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if peer.ConnectionState() == webrtc.PeerConnectionStateClosed {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("%s did not close; peer=%s ICE=%s", name, peer.ConnectionState(), peer.ICEConnectionState())
 }
 
 func TestNewSessionGeneratesCompleteOpusAnswer(t *testing.T) {

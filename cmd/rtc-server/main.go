@@ -37,6 +37,7 @@ func run(ctx context.Context, getenv func(string) string) error {
 		PublicIP:        cfg.PublicIP,
 		UDPPortMin:      cfg.UDPPortMin,
 		UDPPortMax:      cfg.UDPPortMax,
+		ICELite:         cfg.ICELite,
 		Recordings:      recorderFactory,
 		Logger:          logger,
 		AnswerTimeout:   4500 * time.Millisecond,

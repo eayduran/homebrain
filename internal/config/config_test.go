@@ -41,6 +41,22 @@ func TestLoadAppliesDefaultsAndParsesValues(t *testing.T) {
 	if got.SessionTTL != 2*time.Minute || got.LogLevel != slog.LevelDebug {
 		t.Fatalf("unexpected duration/level: %#v", got)
 	}
+	if got.ICELite {
+		t.Fatal("ICE_LITE default = true, want false")
+	}
+}
+
+func TestLoadParsesICELite(t *testing.T) {
+	env := validEnv(t)
+	env["ICE_LITE"] = "true"
+
+	got, err := Load(envGetter(env))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.ICELite {
+		t.Fatal("ICE_LITE = false, want true")
+	}
 }
 
 func TestLoadCreatesRecordingsDirectory(t *testing.T) {
@@ -78,6 +94,7 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 		}},
 		{"invalid TTL", func(_ *testing.T, env map[string]string) { env["SESSION_TTL"] = "soon" }},
 		{"zero TTL", func(_ *testing.T, env map[string]string) { env["SESSION_TTL"] = "0s" }},
+		{"invalid ICE Lite", func(_ *testing.T, env map[string]string) { env["ICE_LITE"] = "enabled" }},
 		{"invalid log level", func(_ *testing.T, env map[string]string) { env["LOG_LEVEL"] = "verbose" }},
 		{"recordings path is a file", func(t *testing.T, env map[string]string) {
 			path := filepath.Join(t.TempDir(), "recordings")
