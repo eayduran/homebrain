@@ -1,0 +1,9 @@
+.env
+rtc-server
+*.test
+*.out
+coverage.*
+lambda/function.zip
+recordings/*.ogg
+!recordings/.gitkeep
+.DS_Store

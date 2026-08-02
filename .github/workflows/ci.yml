@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.x"
+      - name: Check gofmt
+        run: test -z "$(gofmt -l cmd internal)"
+      - name: Vet
+        run: go vet ./...
+      - name: Go tests
+        run: go test ./...
+      - name: Go race tests
+        run: go test -race ./...
+      - name: Lambda tests
+        run: node --test lambda/index.test.mjs
+      - name: Docker build
+        run: docker build .
+      - name: Compose smoke test
+        run: |
+          cp .env.example .env
+          sed -i 's/^PUBLIC_IP=.*/PUBLIC_IP=8.8.8.8/' .env
+          sed -i 's/^SESSION_API_TOKEN=.*/SESSION_API_TOKEN=ci-only-token/' .env
+          docker compose up -d --build --wait
+          curl --fail --silent http://127.0.0.1:8080/healthz
+      - name: Compose cleanup
+        if: always()
+        run: docker compose down --volumes --remove-orphans

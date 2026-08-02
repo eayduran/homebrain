@@ -1,0 +1,9 @@
+.git
+.github
+.env
+recordings/*
+!recordings/.gitkeep
+lambda/function.zip
+rtc-server
+*.test
+*.out
