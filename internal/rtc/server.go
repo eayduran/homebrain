@@ -430,13 +430,13 @@ func normalizeAlexaRejectedVideoPayloads(offer, answer string) string {
 		if !strings.HasPrefix(lines[lineIndex], "m=video ") {
 			continue
 		}
-		payload := ""
+		offered := alexaOfferedVideoPayload{}
 		if videoIndex < len(offeredPayloads) {
-			payload = offeredPayloads[videoIndex]
+			offered = offeredPayloads[videoIndex]
 		}
 		videoIndex++
 
-		normalizedLine, eligible := normalizeAlexaRejectedVideoMLine(lines[lineIndex], payload)
+		normalizedLine, eligible := normalizeAlexaRejectedVideoMLine(lines[lineIndex], offered.payload)
 		if !eligible {
 			continue
 		}
@@ -444,6 +444,22 @@ func normalizeAlexaRejectedVideoPayloads(offer, answer string) string {
 
 		sectionEnd := lineIndex + 1
 		for sectionEnd < len(lines) && !strings.HasPrefix(lines[sectionEnd], "m=") {
+			sectionEnd++
+		}
+		if offered.rtpmap != "" && !alexaSectionHasRTPMap(lines[lineIndex+1:sectionEnd], offered.payload) {
+			insertAt := sectionEnd
+			for sectionLine := lineIndex + 1; sectionLine < sectionEnd; sectionLine++ {
+				if strings.HasPrefix(lines[sectionLine], "a=") {
+					insertAt = sectionLine
+					break
+				}
+			}
+			if insertAt == len(lines) && insertAt > 0 && lines[insertAt-1] == "" {
+				insertAt--
+			}
+			lines = append(lines, "")
+			copy(lines[insertAt+1:], lines[insertAt:])
+			lines[insertAt] = offered.rtpmap
 			sectionEnd++
 		}
 		hasDirection := false
@@ -468,6 +484,11 @@ func normalizeAlexaRejectedVideoPayloads(offer, answer string) string {
 		}
 	}
 	return strings.Join(lines, lineSeparator)
+}
+
+type alexaOfferedVideoPayload struct {
+	payload string
+	rtpmap  string
 }
 
 func normalizeAlexaRejectedVideoMLine(line, payload string) (string, bool) {
@@ -509,15 +530,16 @@ func sdpFieldSpans(line string) [][2]int {
 	return spans
 }
 
-func alexaOfferedVideoPayloads(offer string) []string {
-	var payloads []string
-	for _, line := range strings.Split(strings.ReplaceAll(offer, "\r\n", "\n"), "\n") {
-		if !strings.HasPrefix(line, "m=video ") {
+func alexaOfferedVideoPayloads(offer string) []alexaOfferedVideoPayload {
+	lines := strings.Split(strings.ReplaceAll(offer, "\r\n", "\n"), "\n")
+	payloads := make([]alexaOfferedVideoPayload, 0)
+	for lineIndex := 0; lineIndex < len(lines); lineIndex++ {
+		if !strings.HasPrefix(lines[lineIndex], "m=video ") {
 			continue
 		}
-		fields := strings.Fields(line)
+		fields := strings.Fields(lines[lineIndex])
 		if len(fields) < 4 {
-			payloads = append(payloads, "")
+			payloads = append(payloads, alexaOfferedVideoPayload{})
 			continue
 		}
 		selected := fields[3]
@@ -527,9 +549,38 @@ func alexaOfferedVideoPayloads(offer string) []string {
 				break
 			}
 		}
-		payloads = append(payloads, selected)
+		offered := alexaOfferedVideoPayload{payload: selected}
+		for sectionLine := lineIndex + 1; sectionLine < len(lines) && !strings.HasPrefix(lines[sectionLine], "m="); sectionLine++ {
+			if payload, ok := alexaRTPMapPayload(lines[sectionLine]); ok && payload == selected {
+				offered.rtpmap = lines[sectionLine]
+				break
+			}
+		}
+		payloads = append(payloads, offered)
 	}
 	return payloads
+}
+
+func alexaSectionHasRTPMap(lines []string, payload string) bool {
+	for _, line := range lines {
+		if mappedPayload, ok := alexaRTPMapPayload(line); ok && mappedPayload == payload {
+			return true
+		}
+	}
+	return false
+}
+
+func alexaRTPMapPayload(line string) (string, bool) {
+	const prefix = "a=rtpmap:"
+	if !strings.HasPrefix(line, prefix) {
+		return "", false
+	}
+	value := strings.TrimPrefix(line, prefix)
+	spans := sdpFieldSpans(value)
+	if len(spans) < 2 {
+		return "", false
+	}
+	return value[spans[0][0]:spans[0][1]], true
 }
 
 func validateOffer(raw string) error {

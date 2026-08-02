@@ -481,6 +481,7 @@ func TestAlexaRejectedVideoPayloadNormalizationPreservesAudioAndCandidates(t *te
 		t.Fatalf("candidate lines changed during Alexa normalization: got %v want %v", got, want)
 	}
 	expected := strings.Replace(rawAnswer, "m=video  0  UDP/TLS/RTP/SAVPF  0", "m=video  0  UDP/TLS/RTP/SAVPF  102", 1)
+	expected = strings.Replace(expected, "m=video  0  UDP/TLS/RTP/SAVPF  102\r\nc=IN IP4 0.0.0.0", "m=video  0  UDP/TLS/RTP/SAVPF  102\r\nc=IN IP4 0.0.0.0\r\na=rtpmap:102 VP8/90000", 1)
 	expected = strings.Replace(expected, "a=recvonly", "a=inactive", 1)
 	if normalized != expected {
 		t.Fatalf("Alexa normalization changed unrelated SDP\nwant:\n%s\ngot:\n%s", expected, normalized)
@@ -491,6 +492,133 @@ func TestAlexaRejectedVideoPayloadNormalizationPreservesAudioAndCandidates(t *te
 	fallback := normalizeAlexaRejectedVideoPayloads(fallbackOffer, emptyPayloadAnswer)
 	if got := mediaLine(t, fallback, "video"); got != "m=video  0  UDP/TLS/RTP/SAVPF 112" {
 		t.Fatalf("fallback video m-line = %q, want first offered payload 112", got)
+	}
+}
+
+func TestAlexaRejectedVideoPayloadNormalizationCopiesOnlyExactSelectedRTPMap(t *testing.T) {
+	tests := []struct {
+		name         string
+		lineEnding   string
+		finalNewline bool
+	}{
+		{name: "CRLF with final newline", lineEnding: "\r\n", finalNewline: true},
+		{name: "LF without final newline", lineEnding: "\n", finalNewline: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			offerLines := []string{
+				"v=0",
+				"m=video 9 UDP/TLS/RTP/SAVPF 102 112",
+				"a=mid:1",
+				"a=rtpmap:102  H264/90000",
+				"a=fmtp:102 packetization-mode=1;profile-level-id=42001f",
+				"a=rtcp-fb:102 nack pli",
+				"a=rtpmap:112 H264/90000",
+			}
+			answerLines := []string{
+				"v=0",
+				"a=group:BUNDLE 0",
+				"m=video 0 UDP/TLS/RTP/SAVPF 0",
+				"c=IN IP4 0.0.0.0",
+				"a=mid:1",
+				"a=inactive",
+			}
+			offer := strings.Join(offerLines, tt.lineEnding)
+			answer := strings.Join(answerLines, tt.lineEnding)
+			if tt.finalNewline {
+				offer += tt.lineEnding
+				answer += tt.lineEnding
+			}
+			expectedLines := []string{
+				"v=0",
+				"a=group:BUNDLE 0",
+				"m=video 0 UDP/TLS/RTP/SAVPF 102",
+				"c=IN IP4 0.0.0.0",
+				"a=rtpmap:102  H264/90000",
+				"a=mid:1",
+				"a=inactive",
+			}
+			expected := strings.Join(expectedLines, tt.lineEnding)
+			if tt.finalNewline {
+				expected += tt.lineEnding
+			}
+
+			if got := normalizeAlexaRejectedVideoPayloads(offer, answer); got != expected {
+				t.Fatalf("normalized SDP differs\nwant:\n%q\ngot:\n%q", expected, got)
+			}
+		})
+	}
+}
+
+func TestAlexaRejectedVideoPayloadNormalizationDoesNotSynthesizeMissingRTPMap(t *testing.T) {
+	offer := strings.Join([]string{
+		"v=0",
+		"m=video 9 UDP/TLS/RTP/SAVPF 102",
+		"a=rtpmap:10 H264/90000",
+		"a=rtpmap:1020 H264/90000",
+	}, "\n")
+	answer := strings.Join([]string{
+		"v=0",
+		"m=video 0 UDP/TLS/RTP/SAVPF 0",
+		"c=IN IP4 0.0.0.0",
+		"a=inactive",
+	}, "\n")
+	want := strings.Replace(answer, "SAVPF 0", "SAVPF 102", 1)
+	if got := normalizeAlexaRejectedVideoPayloads(offer, answer); got != want {
+		t.Fatalf("normalizer synthesized or copied a non-matching rtpmap\nwant:\n%s\ngot:\n%s", want, got)
+	}
+}
+
+func TestAlexaRejectedVideoPayloadNormalizationDoesNotDuplicateSelectedRTPMap(t *testing.T) {
+	offer := "v=0\nm=video 9 UDP/TLS/RTP/SAVPF 102\na=rtpmap:102 H264/90000"
+	answer := "v=0\nm=video 0 UDP/TLS/RTP/SAVPF 0\nc=IN IP4 0.0.0.0\na=rtpmap:102 h264/90000\na=inactive"
+	want := strings.Replace(answer, "SAVPF 0", "SAVPF 102", 1)
+	if got := normalizeAlexaRejectedVideoPayloads(offer, answer); got != want {
+		t.Fatalf("normalizer duplicated existing selected rtpmap\nwant:\n%s\ngot:\n%s", want, got)
+	}
+}
+
+func TestAlexaRejectedVideoPayloadNormalizationPreservesFinalNewlineWhenRejectedSectionHasNoAttributes(t *testing.T) {
+	offer := "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 102\r\na=rtpmap:102 H264/90000\r\n"
+	answer := "v=0\r\nm=video 0 UDP/TLS/RTP/SAVPF 0\r\nc=IN IP4 0.0.0.0\r\n"
+	want := "v=0\r\nm=video 0 UDP/TLS/RTP/SAVPF 102\r\nc=IN IP4 0.0.0.0\r\na=rtpmap:102 H264/90000\r\na=inactive\r\n"
+	if got := normalizeAlexaRejectedVideoPayloads(offer, answer); got != want {
+		t.Fatalf("final-newline normalization differs\nwant:\n%q\ngot:\n%q", want, got)
+	}
+}
+
+func TestAlexaRejectedVideoPayloadNormalizationMatchesMultipleVideoSectionsPositionally(t *testing.T) {
+	offer := strings.Join([]string{
+		"v=0",
+		"m=video 9 UDP/TLS/RTP/SAVPF 102 112",
+		"a=rtpmap:102 H264/90000",
+		"a=rtpmap:112 VP8/90000",
+		"m=video 9 UDP/TLS/RTP/SAVPF 120",
+		"a=rtpmap:120 VP9/90000",
+	}, "\n")
+	answer := strings.Join([]string{
+		"v=0",
+		"m=video 0 UDP/TLS/RTP/SAVPF 0",
+		"c=IN IP4 0.0.0.0",
+		"a=inactive",
+		"m=video 0 UDP/TLS/RTP/SAVPF 0",
+		"c=IN IP4 0.0.0.0",
+		"a=inactive",
+	}, "\n")
+	want := strings.Join([]string{
+		"v=0",
+		"m=video 0 UDP/TLS/RTP/SAVPF 102",
+		"c=IN IP4 0.0.0.0",
+		"a=rtpmap:102 H264/90000",
+		"a=inactive",
+		"m=video 0 UDP/TLS/RTP/SAVPF 120",
+		"c=IN IP4 0.0.0.0",
+		"a=rtpmap:120 VP9/90000",
+		"a=inactive",
+	}, "\n")
+	if got := normalizeAlexaRejectedVideoPayloads(offer, answer); got != want {
+		t.Fatalf("positional video mappings differ\nwant:\n%s\ngot:\n%s", want, got)
 	}
 }
 
