@@ -1,5 +1,5 @@
 .env
-rtc-server
+/rtc-server
 *.test
 *.out
 coverage.*
