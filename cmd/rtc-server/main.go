@@ -34,14 +34,16 @@ func run(ctx context.Context, getenv func(string) string) error {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
 	recorderFactory := recording.NewFactory(cfg.RecordingsDir, time.Now)
 	rtcServer, err := rtc.NewServer(rtc.Options{
-		PublicIP:        cfg.PublicIP,
-		UDPPortMin:      cfg.UDPPortMin,
-		UDPPortMax:      cfg.UDPPortMax,
-		ICELite:         cfg.ICELite,
-		Recordings:      recorderFactory,
-		Logger:          logger,
-		AnswerTimeout:   4500 * time.Millisecond,
-		DisconnectGrace: 5 * time.Second,
+		PublicIP:           cfg.PublicIP,
+		UDPPortMin:         cfg.UDPPortMin,
+		UDPPortMax:         cfg.UDPPortMax,
+		ICELite:            cfg.ICELite,
+		AudioPrimeEnabled:  cfg.AudioPrimeEnabled,
+		AudioPrimeDuration: cfg.AudioPrimeDuration,
+		Recordings:         recorderFactory,
+		Logger:             logger,
+		AnswerTimeout:      4500 * time.Millisecond,
+		DisconnectGrace:    5 * time.Second,
 	})
 	if err != nil {
 		return err

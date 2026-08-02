@@ -15,14 +15,18 @@ import (
 )
 
 type Session struct {
-	id              string
-	peer            *webrtc.PeerConnection
-	ctx             context.Context
-	cancel          context.CancelFunc
-	logger          *slog.Logger
-	onTerminal      func()
-	recordings      recording.Factory
-	disconnectGrace time.Duration
+	id                  string
+	peer                *webrtc.PeerConnection
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	logger              *slog.Logger
+	onTerminal          func()
+	recordings          recording.Factory
+	disconnectGrace     time.Duration
+	audioPrimeEnabled   bool
+	audioPrimeDuration  time.Duration
+	audioPrimeWriter    audioPrimeWriter
+	newAudioPrimeTicker func(time.Duration) audioPrimeTicker
 
 	stateMu              sync.Mutex
 	connected            bool
@@ -32,9 +36,11 @@ type Session struct {
 	disconnectGeneration uint64
 	peerState            webrtc.PeerConnectionState
 	expiryTimer          *time.Timer
+	audioPrimeCancel     context.CancelFunc
 
-	closeOnce sync.Once
-	closeErr  error
+	audioPrimeOnce sync.Once
+	closeOnce      sync.Once
+	closeErr       error
 }
 
 func (s *Session) configurePeerCallbacks() {
@@ -140,8 +146,59 @@ func (s *Session) handlePeerConnectionState(state webrtc.PeerConnectionState) {
 		s.disconnectTimer = time.AfterFunc(s.disconnectGrace, func() { s.closeIfStillDisconnected(generation) })
 	}
 	s.stateMu.Unlock()
+	if state == webrtc.PeerConnectionStateConnected {
+		s.startAudioPrime()
+	}
 	if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed {
+		s.stopAudioPrime()
 		go func() { _ = s.Close() }()
+	}
+}
+
+func (s *Session) startAudioPrime() {
+	if !s.audioPrimeEnabled || s.audioPrimeWriter == nil || s.ctx.Err() != nil {
+		return
+	}
+	s.audioPrimeOnce.Do(func() {
+		primeCtx, primeCancel := context.WithCancel(s.ctx)
+		s.stateMu.Lock()
+		if s.ctx.Err() != nil {
+			s.stateMu.Unlock()
+			primeCancel()
+			return
+		}
+		s.audioPrimeCancel = primeCancel
+		s.stateMu.Unlock()
+
+		ticker := s.newAudioPrimeTicker(audioPrimeFrameDuration)
+		s.logger.Info("audio_prime_started", "sessionId", s.id)
+		go func() {
+			frames, reason, err := runAudioPrime(
+				primeCtx,
+				s.audioPrimeWriter,
+				ticker,
+				int(s.audioPrimeDuration/audioPrimeFrameDuration),
+			)
+			if err != nil {
+				s.logger.Error("audio_prime_failed", "sessionId", s.id, "category", "write")
+				return
+			}
+			s.logger.Info(
+				"audio_prime_completed",
+				"sessionId", s.id,
+				"frames", frames,
+				"reason", string(reason),
+			)
+		}()
+	})
+}
+
+func (s *Session) stopAudioPrime() {
+	s.stateMu.Lock()
+	cancel := s.audioPrimeCancel
+	s.stateMu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
 }
 
@@ -162,6 +219,7 @@ func (s *Session) closeIfStillDisconnected(generation uint64) {
 func (s *Session) Close() error {
 	s.closeOnce.Do(func() {
 		s.cancel()
+		s.stopAudioPrime()
 		s.stateMu.Lock()
 		if s.disconnectTimer != nil {
 			s.disconnectTimer.Stop()

@@ -19,6 +19,7 @@ import (
 	"home-brain-rtc/internal/recording"
 	"home-brain-rtc/internal/rtc"
 
+	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -632,6 +633,113 @@ func TestMixedOfferProductionAnswerAppliesToOfferer(t *testing.T) {
 	if got, want := probe.peer.SignalingState(), webrtc.SignalingStateStable; got != want {
 		t.Fatalf("offerer signaling state = %s, want %s", got, want)
 	}
+}
+
+func TestMixedOfferProductionAudioPrimeProducesOpusRTP(t *testing.T) {
+	probe, err := newPionProbe(probeOptions{includeVideo: true}, io.Discard)
+	if err != nil {
+		t.Fatalf("new mixed probe: %v", err)
+	}
+	defer probe.Close()
+
+	packetResults := make(chan audioPrimePacketResult, 2)
+	probe.peer.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
+		if track.Kind() != webrtc.RTPCodecTypeAudio {
+			return
+		}
+		go func() {
+			for range 2 {
+				packet, _, readErr := track.ReadRTP()
+				packetResults <- audioPrimePacketResult{packet: packet, err: readErr}
+				if readErr != nil {
+					return
+				}
+			}
+		}()
+	})
+
+	offerContext, cancelOffer := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelOffer()
+	offer, err := probe.Offer(offerContext)
+	if err != nil {
+		t.Fatalf("create mixed offer: %v", err)
+	}
+
+	server, err := rtc.NewServer(rtc.Options{
+		PublicIP:           net.ParseIP("127.0.0.1"),
+		UDPPortMin:         46310,
+		UDPPortMax:         46410,
+		AudioPrimeEnabled:  true,
+		AudioPrimeDuration: 40 * time.Millisecond,
+		Recordings:         recording.NewFactory(t.TempDir(), time.Now),
+		Logger:             slog.New(slog.NewTextHandler(io.Discard, nil)),
+		AnswerTimeout:      5 * time.Second,
+		DisconnectGrace:    time.Second,
+	})
+	if err != nil {
+		t.Fatalf("new RTC server: %v", err)
+	}
+	serverSession, answer, err := server.NewSession(context.Background(), "rtc-audio-prime-regression", offer, func() {})
+	if err != nil {
+		t.Fatalf("create server session: %v", err)
+	}
+	defer serverSession.Close()
+
+	if got := countSDPMediaSections(answer, "audio"); got != 1 {
+		t.Fatalf("answer audio m-line count = %d, want 1", got)
+	}
+	audioFields := strings.Fields(sdpMediaSection(t, answer, "audio")[0])
+	if len(audioFields) != 4 || audioFields[1] == "0" || audioFields[3] != "111" {
+		t.Fatalf("accepted audio m-line fields = %v, want one active Opus payload 111", audioFields)
+	}
+	videoFields := strings.Fields(sdpMediaSection(t, answer, "video")[0])
+	if len(videoFields) < 2 || videoFields[1] != "0" {
+		t.Fatalf("rejected video m-line fields = %v, want port 0", videoFields)
+	}
+
+	if err := probe.peer.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: answer}); err != nil {
+		t.Fatalf("SetRemoteDescription: %v", err)
+	}
+
+	packets := make([]*rtp.Packet, 0, 2)
+	deadline := time.After(5 * time.Second)
+	for len(packets) < 2 {
+		select {
+		case result := <-packetResults:
+			if result.err != nil {
+				t.Fatalf("read primed RTP: %v", result.err)
+			}
+			packets = append(packets, result.packet)
+		case <-deadline:
+			t.Fatalf("received %d primed RTP packets, want 2", len(packets))
+		}
+	}
+	for packetIndex, packet := range packets {
+		if packet.PayloadType != 111 {
+			t.Fatalf("packet %d payload type = %d, want 111", packetIndex, packet.PayloadType)
+		}
+		if got, want := packet.Payload, []byte{0xf8, 0xff, 0xfe}; !bytes.Equal(got, want) {
+			t.Fatalf("packet %d payload = %x, want %x", packetIndex, got, want)
+		}
+	}
+	if got := packets[1].Timestamp - packets[0].Timestamp; got != 960 {
+		t.Fatalf("RTP timestamp delta = %d, want 960", got)
+	}
+}
+
+type audioPrimePacketResult struct {
+	packet *rtp.Packet
+	err    error
+}
+
+func countSDPMediaSections(raw, media string) int {
+	count := 0
+	for _, line := range strings.Split(strings.ReplaceAll(raw, "\r\n", "\n"), "\n") {
+		if strings.HasPrefix(line, "m="+media+" ") {
+			count++
+		}
+	}
+	return count
 }
 
 func countSDPLine(lines []string, want string) int {

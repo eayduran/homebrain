@@ -24,22 +24,26 @@ var (
 )
 
 type Options struct {
-	PublicIP        net.IP
-	UDPPortMin      uint16
-	UDPPortMax      uint16
-	ICELite         bool
-	Recordings      recording.Factory
-	Logger          *slog.Logger
-	AnswerTimeout   time.Duration
-	DisconnectGrace time.Duration
+	PublicIP           net.IP
+	UDPPortMin         uint16
+	UDPPortMax         uint16
+	ICELite            bool
+	AudioPrimeEnabled  bool
+	AudioPrimeDuration time.Duration
+	Recordings         recording.Factory
+	Logger             *slog.Logger
+	AnswerTimeout      time.Duration
+	DisconnectGrace    time.Duration
 }
 
 type Server struct {
-	api             *webrtc.API
-	recordings      recording.Factory
-	logger          *slog.Logger
-	answerTimeout   time.Duration
-	disconnectGrace time.Duration
+	api                *webrtc.API
+	recordings         recording.Factory
+	logger             *slog.Logger
+	answerTimeout      time.Duration
+	disconnectGrace    time.Duration
+	audioPrimeEnabled  bool
+	audioPrimeDuration time.Duration
 }
 
 func NewServer(opts Options) (*Server, error) {
@@ -60,6 +64,12 @@ func NewServer(opts Options) (*Server, error) {
 	}
 	if opts.DisconnectGrace <= 0 {
 		opts.DisconnectGrace = 5 * time.Second
+	}
+	if opts.AudioPrimeDuration <= 0 {
+		opts.AudioPrimeDuration = 10 * time.Second
+	}
+	if opts.AudioPrimeDuration < audioPrimeFrameDuration || opts.AudioPrimeDuration%audioPrimeFrameDuration != 0 {
+		return nil, errors.New("audio prime duration must be a positive multiple of 20ms")
 	}
 
 	mediaEngine := &webrtc.MediaEngine{}
@@ -92,11 +102,13 @@ func NewServer(opts Options) (*Server, error) {
 	}
 
 	return &Server{
-		api:             webrtc.NewAPI(webrtc.WithMediaEngine(mediaEngine), webrtc.WithSettingEngine(settings)),
-		recordings:      opts.Recordings,
-		logger:          opts.Logger,
-		answerTimeout:   opts.AnswerTimeout,
-		disconnectGrace: opts.DisconnectGrace,
+		api:                webrtc.NewAPI(webrtc.WithMediaEngine(mediaEngine), webrtc.WithSettingEngine(settings)),
+		recordings:         opts.Recordings,
+		logger:             opts.Logger,
+		answerTimeout:      opts.AnswerTimeout,
+		disconnectGrace:    opts.DisconnectGrace,
+		audioPrimeEnabled:  opts.AudioPrimeEnabled,
+		audioPrimeDuration: opts.AudioPrimeDuration,
 	}, nil
 }
 
@@ -113,14 +125,7 @@ func (s *Server) NewSession(ctx context.Context, id, offer string, onTerminal fu
 	if err != nil {
 		return nil, "", fmt.Errorf("create peer connection: %w", err)
 	}
-	sessionCtx, cancel := context.WithCancel(context.Background())
-	session := &Session{
-		id: id, peer: peer, cancel: cancel, ctx: sessionCtx, logger: s.logger,
-		onTerminal: onTerminal, recordings: s.recordings, disconnectGrace: s.disconnectGrace,
-	}
-	session.configurePeerCallbacks()
-
-	localTrack, err := webrtc.NewTrackLocalStaticRTP(
+	localTrack, err := webrtc.NewTrackLocalStaticSample(
 		webrtc.RTPCodecCapability{
 			MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2,
 			SDPFmtpLine: "minptime=10;useinbandfec=1",
@@ -128,9 +133,18 @@ func (s *Server) NewSession(ctx context.Context, id, offer string, onTerminal fu
 		"home-brain-audio", "home-brain",
 	)
 	if err != nil {
-		_ = session.Close()
+		_ = peer.Close()
 		return nil, "", fmt.Errorf("create local Opus track: %w", err)
 	}
+	sessionCtx, cancel := context.WithCancel(context.Background())
+	session := &Session{
+		id: id, peer: peer, cancel: cancel, ctx: sessionCtx, logger: s.logger,
+		onTerminal: onTerminal, recordings: s.recordings, disconnectGrace: s.disconnectGrace,
+		audioPrimeEnabled: s.audioPrimeEnabled, audioPrimeDuration: s.audioPrimeDuration,
+		audioPrimeWriter: localTrack, newAudioPrimeTicker: newWallClockAudioPrimeTicker,
+	}
+	session.configurePeerCallbacks()
+
 	sender, err := peer.AddTrack(localTrack)
 	if err != nil {
 		_ = session.Close()

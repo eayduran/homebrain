@@ -44,6 +44,12 @@ func TestLoadAppliesDefaultsAndParsesValues(t *testing.T) {
 	if got.ICELite {
 		t.Fatal("ICE_LITE default = true, want false")
 	}
+	if got.AudioPrimeEnabled {
+		t.Fatal("RTC_AUDIO_PRIME_ENABLED default = true, want false")
+	}
+	if got.AudioPrimeDuration != 10*time.Second {
+		t.Fatalf("RTC_AUDIO_PRIME_DURATION default = %s, want 10s", got.AudioPrimeDuration)
+	}
 }
 
 func TestLoadParsesICELite(t *testing.T) {
@@ -56,6 +62,23 @@ func TestLoadParsesICELite(t *testing.T) {
 	}
 	if !got.ICELite {
 		t.Fatal("ICE_LITE = false, want true")
+	}
+}
+
+func TestLoadParsesAudioPrime(t *testing.T) {
+	env := validEnv(t)
+	env["RTC_AUDIO_PRIME_ENABLED"] = "true"
+	env["RTC_AUDIO_PRIME_DURATION"] = "40ms"
+
+	got, err := Load(envGetter(env))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.AudioPrimeEnabled {
+		t.Fatal("RTC_AUDIO_PRIME_ENABLED = false, want true")
+	}
+	if got.AudioPrimeDuration != 40*time.Millisecond {
+		t.Fatalf("RTC_AUDIO_PRIME_DURATION = %s, want 40ms", got.AudioPrimeDuration)
 	}
 }
 
@@ -95,6 +118,12 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 		{"invalid TTL", func(_ *testing.T, env map[string]string) { env["SESSION_TTL"] = "soon" }},
 		{"zero TTL", func(_ *testing.T, env map[string]string) { env["SESSION_TTL"] = "0s" }},
 		{"invalid ICE Lite", func(_ *testing.T, env map[string]string) { env["ICE_LITE"] = "enabled" }},
+		{"invalid audio prime enabled", func(_ *testing.T, env map[string]string) { env["RTC_AUDIO_PRIME_ENABLED"] = "enabled" }},
+		{"invalid audio prime duration", func(_ *testing.T, env map[string]string) { env["RTC_AUDIO_PRIME_DURATION"] = "soon" }},
+		{"zero audio prime duration", func(_ *testing.T, env map[string]string) { env["RTC_AUDIO_PRIME_DURATION"] = "0s" }},
+		{"negative audio prime duration", func(_ *testing.T, env map[string]string) { env["RTC_AUDIO_PRIME_DURATION"] = "-20ms" }},
+		{"short audio prime duration", func(_ *testing.T, env map[string]string) { env["RTC_AUDIO_PRIME_DURATION"] = "10ms" }},
+		{"unaligned audio prime duration", func(_ *testing.T, env map[string]string) { env["RTC_AUDIO_PRIME_DURATION"] = "30ms" }},
 		{"invalid log level", func(_ *testing.T, env map[string]string) { env["LOG_LEVEL"] = "verbose" }},
 		{"recordings path is a file", func(t *testing.T, env map[string]string) {
 			path := filepath.Join(t.TempDir(), "recordings")

@@ -328,6 +328,19 @@ func TestNewSessionGeneratesCompleteOpusAnswer(t *testing.T) {
 	if strings.Contains(lower, " typ tcp ") {
 		t.Fatal("answer unexpectedly contains TCP candidate")
 	}
+	audioSection := mediaSection(t, answer, "audio")
+	audioFields := strings.Fields(strings.SplitN(audioSection, "\r\n", 2)[0])
+	if len(audioFields) != 4 || audioFields[1] == "0" || audioFields[3] != "111" {
+		t.Fatalf("disabled-prime audio m-line fields = %v, want active sole payload 111", audioFields)
+	}
+	for _, want := range []string{
+		"\r\na=rtpmap:111 opus/48000/2\r\n",
+		"\r\na=fmtp:111 minptime=10;useinbandfec=1\r\n",
+	} {
+		if !strings.Contains(strings.ToLower(audioSection), want) {
+			t.Fatalf("disabled-prime audio section missing %q:\n%s", want, audioSection)
+		}
+	}
 }
 
 func TestNewSessionRejectsMalformedAndNonOpusOffers(t *testing.T) {

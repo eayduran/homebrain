@@ -18,19 +18,23 @@ const (
 	defaultUDPPortMax   = uint16(40020)
 	defaultRecordings   = "/data/recordings"
 	defaultSessionTTL   = 10 * time.Minute
+	defaultAudioPrime   = 10 * time.Second
+	audioPrimeFrame     = 20 * time.Millisecond
 	defaultLogLevelName = "info"
 )
 
 type Config struct {
-	HTTPAddr        string
-	PublicIP        net.IP
-	UDPPortMin      uint16
-	UDPPortMax      uint16
-	SessionAPIToken string
-	RecordingsDir   string
-	SessionTTL      time.Duration
-	LogLevel        slog.Level
-	ICELite         bool
+	HTTPAddr           string
+	PublicIP           net.IP
+	UDPPortMin         uint16
+	UDPPortMax         uint16
+	SessionAPIToken    string
+	RecordingsDir      string
+	SessionTTL         time.Duration
+	LogLevel           slog.Level
+	ICELite            bool
+	AudioPrimeEnabled  bool
+	AudioPrimeDuration time.Duration
 }
 
 func Load(getenv func(string) string) (Config, error) {
@@ -78,17 +82,30 @@ func Load(getenv func(string) string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	audioPrimeEnabled, err := parseBool(getenv("RTC_AUDIO_PRIME_ENABLED"), "RTC_AUDIO_PRIME_ENABLED")
+	if err != nil {
+		return Config{}, err
+	}
+	audioPrimeDuration := defaultAudioPrime
+	if raw := getenv("RTC_AUDIO_PRIME_DURATION"); raw != "" {
+		audioPrimeDuration, err = time.ParseDuration(raw)
+		if err != nil || audioPrimeDuration < audioPrimeFrame || audioPrimeDuration%audioPrimeFrame != 0 {
+			return Config{}, errors.New("RTC_AUDIO_PRIME_DURATION must be a positive multiple of 20ms")
+		}
+	}
 
 	return Config{
-		HTTPAddr:        valueOr(getenv("HTTP_ADDR"), defaultHTTPAddr),
-		PublicIP:        publicIP,
-		UDPPortMin:      portMin,
-		UDPPortMax:      portMax,
-		SessionAPIToken: token,
-		RecordingsDir:   recordingsDir,
-		SessionTTL:      ttl,
-		LogLevel:        level,
-		ICELite:         iceLite,
+		HTTPAddr:           valueOr(getenv("HTTP_ADDR"), defaultHTTPAddr),
+		PublicIP:           publicIP,
+		UDPPortMin:         portMin,
+		UDPPortMax:         portMax,
+		SessionAPIToken:    token,
+		RecordingsDir:      recordingsDir,
+		SessionTTL:         ttl,
+		LogLevel:           level,
+		ICELite:            iceLite,
+		AudioPrimeEnabled:  audioPrimeEnabled,
+		AudioPrimeDuration: audioPrimeDuration,
 	}, nil
 }
 
