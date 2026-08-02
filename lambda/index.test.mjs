@@ -215,17 +215,81 @@ test('SessionConnected posts observation and returns matching event', async () =
   assert.equal(response.event.header.correlationToken, 'correlation-1');
 });
 
-test('SessionDisconnected deletes session and returns matching event', async () => {
-  let observed;
-  const response = await handlerWith(async (url, options) => {
-    observed = {url, options};
-    return new Response('{"status":"closed"}', {status: 200});
+for (const {httpStatus, cleanupStatus} of [
+  {httpStatus: 204, cleanupStatus: 'deleted'},
+  {httpStatus: 404, cleanupStatus: 'already_absent'},
+  {httpStatus: 410, cleanupStatus: 'already_absent'},
+]) {
+  test(`SessionDisconnected treats HTTP ${httpStatus} as successful cleanup`, async () => {
+    const capture = loggerCapture();
+    let observed;
+    const request = directive('Alexa.RTCSessionController', 'SessionDisconnected', {sessionId: 'session-1'});
+    const response = await handlerWith(async (url, options) => {
+      observed = {url, options};
+      return new Response(httpStatus === 204 ? null : 'sentinel-cleanup-response-body', {status: httpStatus});
+    }, {logger: capture.logger})(request);
+
+    assert.equal(observed.url, `${env.RTC_SERVER_URL}/v1/rtc/sessions/session-1`);
+    assert.equal(observed.options.method, 'DELETE');
+    assert.equal(response.event.header.namespace, 'Alexa.RTCSessionController');
+    assert.equal(response.event.header.name, 'SessionDisconnected');
+    assert.equal(response.event.header.correlationToken, 'correlation-1');
+    assert.deepEqual(response.event.endpoint, request.directive.endpoint);
+    assert.equal(response.event.payload.sessionId, 'session-1');
+
+    const cleanupLogs = capture.calls.filter((entry) => entry.message === 'rtc_session_cleanup_completed');
+    assert.equal(cleanupLogs.length, 1);
+    assert.deepEqual(cleanupLogs[0].metadata, {status: cleanupStatus});
+
+    const logs = capture.entries.join('\n');
+    for (const secret of [
+      env.RTC_SERVER_TOKEN,
+      'alexa-oauth-sentinel',
+      'sentinel-cleanup-response-body',
+      `Bearer ${env.RTC_SERVER_TOKEN}`,
+    ]) {
+      assert.equal(logs.includes(secret), false, `cleanup logs contained ${secret}`);
+    }
+  });
+}
+
+for (const httpStatus of [401, 403, 500]) {
+  test(`SessionDisconnected treats HTTP ${httpStatus} as cleanup failure`, async () => {
+    const capture = loggerCapture();
+    const response = await handlerWith(
+      async () => new Response('sentinel-cleanup-error-body', {status: httpStatus}),
+      {logger: capture.logger},
+    )(directive('Alexa.RTCSessionController', 'SessionDisconnected', {sessionId: 'session-1'}));
+
+    assert.equal(response.event.header.namespace, 'Alexa');
+    assert.equal(response.event.header.name, 'ErrorResponse');
+    assert.equal(response.event.payload.type, 'ENDPOINT_UNREACHABLE');
+    assert.equal(capture.calls.some((entry) => entry.message === 'rtc_session_cleanup_completed'), false);
+    assert.equal(capture.entries.join('\n').includes('sentinel-cleanup-error-body'), false);
+  });
+}
+
+test('SessionDisconnected treats a network error as cleanup failure', async () => {
+  const response = await handlerWith(async () => {
+    throw new Error('network unavailable');
   })(directive('Alexa.RTCSessionController', 'SessionDisconnected', {sessionId: 'session-1'}));
-  assert.equal(observed.url, `${env.RTC_SERVER_URL}/v1/rtc/sessions/session-1`);
-  assert.equal(observed.options.method, 'DELETE');
-  assert.equal(response.event.header.name, 'SessionDisconnected');
-  assert.equal(response.event.payload.sessionId, 'session-1');
-  assert.equal(response.event.header.correlationToken, 'correlation-1');
+
+  assert.equal(response.event.header.namespace, 'Alexa');
+  assert.equal(response.event.header.name, 'ErrorResponse');
+  assert.equal(response.event.payload.type, 'ENDPOINT_UNREACHABLE');
+});
+
+test('SessionDisconnected treats a timeout as cleanup failure', async () => {
+  const fetchImpl = (_url, {signal}) => new Promise((_resolve, reject) => {
+    signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), {once: true});
+  });
+  const response = await handlerWith(fetchImpl, {timeoutMs: 10})(
+    directive('Alexa.RTCSessionController', 'SessionDisconnected', {sessionId: 'session-1'}),
+  );
+
+  assert.equal(response.event.header.namespace, 'Alexa');
+  assert.equal(response.event.header.name, 'ErrorResponse');
+  assert.equal(response.event.payload.type, 'ENDPOINT_UNREACHABLE');
 });
 
 test('logs never contain tokens or SDP', async () => {

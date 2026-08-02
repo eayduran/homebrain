@@ -22,7 +22,12 @@ export function createHandler({
     return header;
   };
 
-  const rtcRequest = async (path, {method = 'POST', body} = {}) => {
+  const rtcRequest = async (path, {
+    method = 'POST',
+    body,
+    acceptedStatuses = [],
+    returnStatus = false,
+  } = {}) => {
     if (!env.RTC_SERVER_URL || !env.RTC_SERVER_TOKEN) {
       throw new Error('RTC server environment is incomplete');
     }
@@ -38,8 +43,11 @@ export function createHandler({
         },
         body: body === undefined ? undefined : JSON.stringify(body),
       });
-      if (!response.ok) {
+      if (!response.ok && !acceptedStatuses.includes(response.status)) {
         throw new Error('RTC server returned a non-success status');
+      }
+      if (returnStatus) {
+        return response.status;
       }
       const text = await response.text();
       return text === '' ? undefined : JSON.parse(text);
@@ -219,7 +227,14 @@ export function createHandler({
         if (!sessionId) {
           throw new Error('sessionId is required');
         }
-        await rtcRequest(`/v1/rtc/sessions/${encodeURIComponent(sessionId)}`, {method: 'DELETE'});
+        const status = await rtcRequest(`/v1/rtc/sessions/${encodeURIComponent(sessionId)}`, {
+          method: 'DELETE',
+          acceptedStatuses: [404, 410],
+          returnStatus: true,
+        });
+        logger.info('rtc_session_cleanup_completed', {
+          status: status === 404 || status === 410 ? 'already_absent' : 'deleted',
+        });
         return endpointEvent(request, 'SessionDisconnected', {sessionId});
       }
     } catch {
