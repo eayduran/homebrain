@@ -10,11 +10,19 @@ const env = {
 
 function loggerCapture() {
   const entries = [];
+  const calls = [];
   return {
     entries,
+    calls,
     logger: {
-      info(message, metadata) { entries.push(JSON.stringify([message, metadata])); },
-      error(message, metadata) { entries.push(JSON.stringify([message, metadata])); },
+      info(message, metadata) {
+        calls.push({level: 'info', message, metadata});
+        entries.push(JSON.stringify([message, metadata]));
+      },
+      error(message, metadata) {
+        calls.push({level: 'error', message, metadata});
+        entries.push(JSON.stringify([message, metadata]));
+      },
     },
   };
 }
@@ -104,6 +112,75 @@ test('InitiateSessionWithOffer sends offer and returns answer with routing metad
   assert.deepEqual(response.event.payload.answer, {format: 'SDP', value: 'v=0\r\nsentinel-answer'});
 });
 
+test('InitiateSessionWithOffer logs safe answer-return metadata', async () => {
+  const capture = loggerCapture();
+  const request = directive('Alexa.RTCSessionController', 'InitiateSessionWithOffer', {
+    sessionId: 'session-1',
+    offer: {format: 'SDP', value: 'v=0\r\nsentinel-offer-sdp'},
+  });
+  const response = await handlerWith(
+    async () => new Response(JSON.stringify({sessionId: 'session-1', answerSdp: 'v=0\r\nsentinel-answer'}), {status: 200}),
+    {logger: capture.logger},
+  )(request, {
+    functionVersion: '42',
+    invokedFunctionArn: 'arn:aws:lambda:eu-west-1:123456789012:function:homebrain:42',
+  });
+
+  const diagnostics = capture.calls.filter((entry) => entry.message === 'rtc_answer_returned');
+  assert.equal(diagnostics.length, 1);
+  const {elapsedMs, ...metadata} = diagnostics[0].metadata;
+  assert.deepEqual(metadata, {
+    functionVersion: '42',
+    invokedFunctionArn: 'arn:aws:lambda:eu-west-1:123456789012:function:homebrain:42',
+    requestNamespace: 'Alexa.RTCSessionController',
+    requestName: 'InitiateSessionWithOffer',
+    responseNamespace: 'Alexa.RTCSessionController',
+    responseName: 'AnswerGeneratedForSession',
+    payloadVersion: '3',
+    hasRequestCorrelationToken: true,
+    hasResponseCorrelationToken: true,
+    correlationTokenMatches: true,
+    hasRequestEndpointId: true,
+    hasResponseEndpointId: true,
+    endpointIdMatches: true,
+    hasScope: true,
+    answerFormat: 'SDP',
+    answerType: 'string',
+    answerBytes: 20,
+    answerStartsWithV0: true,
+    hasStatusCodeWrapper: false,
+    hasBodyWrapper: false,
+  });
+  assert.equal(Number.isFinite(elapsedMs), true);
+  assert.equal(elapsedMs >= 0, true);
+  assert.deepEqual(response.event.payload.answer, {format: 'SDP', value: 'v=0\r\nsentinel-answer'});
+  assert.equal(Object.hasOwn(response, 'statusCode'), false);
+  assert.equal(Object.hasOwn(response, 'body'), false);
+});
+
+test('InitiateSessionWithOffer logs missing routing identifiers separately from equality', async () => {
+  const capture = loggerCapture();
+  const request = directive('Alexa.RTCSessionController', 'InitiateSessionWithOffer', {
+    sessionId: 'session-without-routing',
+    offer: {format: 'SDP', value: 'v=0\r\noffer'},
+  });
+  delete request.directive.header.correlationToken;
+  delete request.directive.endpoint.endpointId;
+
+  await handlerWith(
+    async () => new Response(JSON.stringify({answerSdp: 'v=0\r\nanswer'}), {status: 200}),
+    {logger: capture.logger},
+  )(request, {});
+
+  const metadata = capture.calls.find((entry) => entry.message === 'rtc_answer_returned')?.metadata;
+  assert.equal(metadata.hasRequestCorrelationToken, false);
+  assert.equal(metadata.hasResponseCorrelationToken, false);
+  assert.equal(metadata.correlationTokenMatches, true);
+  assert.equal(metadata.hasRequestEndpointId, false);
+  assert.equal(metadata.hasResponseEndpointId, false);
+  assert.equal(metadata.endpointIdMatches, true);
+});
+
 test('RTC server timeout returns ENDPOINT_UNREACHABLE', async () => {
   const fetchImpl = (_url, {signal}) => new Promise((_resolve, reject) => {
     signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), {once: true});
@@ -163,7 +240,13 @@ test('logs never contain tokens or SDP', async () => {
     sessionId: 'session-1', offer: {format: 'SDP', value: 'v=0\r\nsentinel-offer-sdp'},
   }));
   const logs = capture.entries.join('\n');
-  for (const secret of [env.RTC_SERVER_TOKEN, 'alexa-oauth-sentinel', 'sentinel-offer-sdp', 'sentinel-answer-sdp']) {
+  for (const secret of [
+    env.RTC_SERVER_TOKEN,
+    'alexa-oauth-sentinel',
+    'correlation-1',
+    'sentinel-offer-sdp',
+    'sentinel-answer-sdp',
+  ]) {
     assert.equal(logs.includes(secret), false, `logs contained ${secret}`);
   }
   assert.match(logs, /InitiateSessionWithOffer/);

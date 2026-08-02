@@ -70,7 +70,8 @@ export function createHandler({
     return {event};
   };
 
-  return async function handle(requestEnvelope) {
+  return async function handle(requestEnvelope, context) {
+    const startedAt = Date.now();
     const request = requestEnvelope?.directive;
     if (!request?.header?.namespace || !request?.header?.name) {
       throw new Error('invalid Alexa directive');
@@ -160,9 +161,50 @@ export function createHandler({
         if (typeof result?.answerSdp !== 'string' || result.answerSdp === '') {
           throw new Error('RTC server response does not contain answer SDP');
         }
-        return endpointEvent(request, 'AnswerGeneratedForSession', {
+        const response = endpointEvent(request, 'AnswerGeneratedForSession', {
           answer: {format: 'SDP', value: result.answerSdp},
         });
+        logger.info('rtc_answer_returned', {
+          functionVersion: context?.functionVersion,
+          invokedFunctionArn: context?.invokedFunctionArn,
+
+          requestNamespace: request.header?.namespace,
+          requestName: request.header?.name,
+
+          responseNamespace: response.event?.header?.namespace,
+          responseName: response.event?.header?.name,
+          payloadVersion: response.event?.header?.payloadVersion,
+
+          hasRequestCorrelationToken: Boolean(request.header?.correlationToken),
+          hasResponseCorrelationToken: Boolean(response.event?.header?.correlationToken),
+          correlationTokenMatches:
+            response.event?.header?.correlationToken ===
+            request.header?.correlationToken,
+
+          hasRequestEndpointId: Boolean(request.endpoint?.endpointId),
+          hasResponseEndpointId: Boolean(response.event?.endpoint?.endpointId),
+          endpointIdMatches:
+            response.event?.endpoint?.endpointId ===
+            request.endpoint?.endpointId,
+
+          hasScope: Boolean(response.event?.endpoint?.scope),
+          answerFormat: response.event?.payload?.answer?.format,
+          answerType: typeof response.event?.payload?.answer?.value,
+          answerBytes: Buffer.byteLength(
+            response.event?.payload?.answer?.value ?? '',
+            'utf8',
+          ),
+          answerStartsWithV0:
+            response.event?.payload?.answer?.value?.startsWith('v=0') === true,
+
+          hasStatusCodeWrapper:
+            Object.prototype.hasOwnProperty.call(response, 'statusCode'),
+          hasBodyWrapper:
+            Object.prototype.hasOwnProperty.call(response, 'body'),
+
+          elapsedMs: Date.now() - startedAt,
+        });
+        return response;
       }
 
       if (namespace === 'Alexa.RTCSessionController' && name === 'SessionConnected') {
@@ -197,6 +239,6 @@ export function createHandler({
 
 const defaultHandler = createHandler();
 
-export async function handler(event) {
-  return defaultHandler(event);
+export async function handler(event, context) {
+  return defaultHandler(event, context);
 }
