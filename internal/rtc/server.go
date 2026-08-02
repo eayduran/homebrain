@@ -161,7 +161,20 @@ func (s *Server) NewSession(ctx context.Context, id, offer string, onTerminal fu
 		}
 		videoNormalizedAnswer := normalizeAlexaRejectedVideoPayloads(offer, local.SDP)
 		normalizedAnswer := normalizeAlexaRTCPMuxCandidates(videoNormalizedAnswer)
-		s.logger.Info("sdp_answer_generated", "sessionId", id, "offerBytes", len(offer), "answerBytes", len(normalizedAnswer))
+		offerMetadata := extractICESDPLogMetadata(offer)
+		answerMetadata := extractICESDPLogMetadata(normalizedAnswer)
+		s.logger.Info(
+			"sdp_answer_generated",
+			"sessionId", id,
+			"offerBytes", len(offer),
+			"answerBytes", len(normalizedAnswer),
+			"offerHasIceLite", offerMetadata.HasIceLite,
+			"answerHasIceLite", answerMetadata.HasIceLite,
+			"offerHasTrickle", offerMetadata.HasTrickle,
+			"answerHasTrickle", answerMetadata.HasTrickle,
+			"offerBundleMids", offerMetadata.BundleMIDs,
+			"answerBundleMids", answerMetadata.BundleMIDs,
+		)
 		s.logger.Info("session_created", "sessionId", id)
 		return session, normalizedAnswer, nil
 	case <-deadlineCtx.Done():
@@ -232,6 +245,41 @@ func normalizeAlexaRTCPMuxCandidates(answer string) string {
 		}
 	}
 	return strings.Join(normalized, lineSeparator)
+}
+
+type iceSDPLogMetadata struct {
+	HasIceLite bool
+	HasTrickle bool
+	BundleMIDs []string
+}
+
+func extractICESDPLogMetadata(raw string) iceSDPLogMetadata {
+	metadata := iceSDPLogMetadata{BundleMIDs: []string{}}
+	bundleSeen := false
+	for _, line := range strings.Split(strings.ReplaceAll(raw, "\r\n", "\n"), "\n") {
+		if strings.HasPrefix(line, "m=") {
+			break
+		}
+		if line == "a=ice-lite" {
+			metadata.HasIceLite = true
+			continue
+		}
+		if strings.HasPrefix(line, "a=ice-options:") {
+			for _, option := range strings.Fields(strings.TrimPrefix(line, "a=ice-options:")) {
+				if option == "trickle" {
+					metadata.HasTrickle = true
+					break
+				}
+			}
+			continue
+		}
+		fields := strings.Fields(line)
+		if !bundleSeen && len(fields) > 0 && fields[0] == "a=group:BUNDLE" {
+			bundleSeen = true
+			metadata.BundleMIDs = append(metadata.BundleMIDs, fields[1:]...)
+		}
+	}
+	return metadata
 }
 
 // normalizeAlexaRejectedVideoPayloads is an Alexa interoperability boundary,

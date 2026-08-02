@@ -3,6 +3,7 @@ package rtc
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -25,6 +26,23 @@ type offerFixture struct {
 	peer  *webrtc.PeerConnection
 	track *webrtc.TrackLocalStaticRTP
 	offer string
+}
+
+type synchronizedBuffer struct {
+	mu   sync.Mutex
+	data bytes.Buffer
+}
+
+func (b *synchronizedBuffer) Write(data []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.data.Write(data)
+}
+
+func (b *synchronizedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.data.String()
 }
 
 type terminalDuringCreateFactory struct {
@@ -582,6 +600,211 @@ func TestAlexaRTCPMuxCandidateNormalizationPreservesFramingAndOtherSections(t *t
 				}
 			}
 		})
+	}
+}
+
+func TestExtractICESDPLogMetadata(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		raw  string
+		want iceSDPLogMetadata
+	}{
+		{
+			name: "CRLF exact session-level attributes",
+			raw: strings.Join([]string{
+				"v=0",
+				"o=- 1 1 IN IP4 0.0.0.0",
+				"s=-",
+				"t=0 0",
+				"a=group:BUNDLE audio video data",
+				"a=group:BUNDLE ignored",
+				"a=ice-lite",
+				"a=ice-options:renomination trickle",
+				"m=audio 9 UDP/TLS/RTP/SAVPF 111",
+				"a=group:BUNDLE media-level-ignored",
+				"a=ice-lite",
+				"a=ice-options:trickle",
+				"",
+			}, "\r\n"),
+			want: iceSDPLogMetadata{
+				HasIceLite: true,
+				HasTrickle: true,
+				BundleMIDs: []string{"audio", "video", "data"},
+			},
+		},
+		{
+			name: "LF safe defaults and exact tokens",
+			raw: strings.Join([]string{
+				"v=0",
+				"a=ice-lite-extra",
+				"a=ice-options:nottrickle trickle2",
+				"a=group:BUNDLE",
+				"m=audio 9 UDP/TLS/RTP/SAVPF 111",
+				"a=group:BUNDLE media-mid",
+				"a=ice-lite",
+				"a=ice-options:trickle",
+			}, "\n"),
+			want: iceSDPLogMetadata{BundleMIDs: []string{}},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractICESDPLogMetadata(tt.raw)
+			if got.HasIceLite != tt.want.HasIceLite {
+				t.Fatalf("HasIceLite = %t, want %t", got.HasIceLite, tt.want.HasIceLite)
+			}
+			if got.HasTrickle != tt.want.HasTrickle {
+				t.Fatalf("HasTrickle = %t, want %t", got.HasTrickle, tt.want.HasTrickle)
+			}
+			if got.BundleMIDs == nil {
+				t.Fatal("BundleMIDs = nil, want non-nil empty-or-populated list")
+			}
+			if !equalStrings(got.BundleMIDs, tt.want.BundleMIDs) {
+				t.Fatalf("BundleMIDs = %q, want %q", got.BundleMIDs, tt.want.BundleMIDs)
+			}
+		})
+	}
+}
+
+func TestICESDPLogMetadataEmptyBundleMIDsSerializeAsArrays(t *testing.T) {
+	metadata := extractICESDPLogMetadata("v=0\nm=audio 9 UDP/TLS/RTP/SAVPF 111")
+	var logs synchronizedBuffer
+	slog.New(slog.NewJSONHandler(&logs, nil)).Info(
+		"sdp_answer_generated",
+		"offerBundleMids", metadata.BundleMIDs,
+		"answerBundleMids", metadata.BundleMIDs,
+	)
+	var record map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(logs.String()), &record); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"offerBundleMids", "answerBundleMids"} {
+		if got := string(record[key]); got != "[]" {
+			t.Fatalf("%s JSON = %s, want []", key, got)
+		}
+	}
+}
+
+func TestNewSessionLogsICESDPMetadata(t *testing.T) {
+	fixture := newOffer(t, true, false)
+	offer := strings.Replace(
+		fixture.offer,
+		"\r\nm=audio ",
+		"\r\na=ice-options:renomination trickle\r\nm=audio ",
+		1,
+	)
+	if offer == fixture.offer {
+		t.Fatal("test offer did not contain the expected audio m-line")
+	}
+
+	var logs synchronizedBuffer
+	server, err := NewServer(Options{
+		PublicIP:        net.ParseIP("8.8.8.8"),
+		UDPPortMin:      50000,
+		UDPPortMax:      50100,
+		ICELite:         true,
+		Recordings:      recording.NewFactory(t.TempDir(), time.Now),
+		Logger:          slog.New(slog.NewJSONHandler(&logs, nil)),
+		AnswerTimeout:   2 * time.Second,
+		DisconnectGrace: 50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, answer, err := server.NewSession(context.Background(), "ice-log-session", offer, func() {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+
+	var record struct {
+		Message          string   `json:"msg"`
+		SessionID        string   `json:"sessionId"`
+		OfferBytes       int      `json:"offerBytes"`
+		AnswerBytes      int      `json:"answerBytes"`
+		OfferHasIceLite  bool     `json:"offerHasIceLite"`
+		AnswerHasIceLite bool     `json:"answerHasIceLite"`
+		OfferHasTrickle  bool     `json:"offerHasTrickle"`
+		AnswerHasTrickle bool     `json:"answerHasTrickle"`
+		OfferBundleMIDs  []string `json:"offerBundleMids"`
+		AnswerBundleMIDs []string `json:"answerBundleMids"`
+	}
+	found := false
+	var rawRecord map[string]json.RawMessage
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var candidateRecord struct {
+			Message string `json:"msg"`
+		}
+		if err := json.Unmarshal([]byte(line), &candidateRecord); err != nil {
+			t.Fatal(err)
+		}
+		if candidateRecord.Message != "sdp_answer_generated" {
+			continue
+		}
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal([]byte(line), &rawRecord); err != nil {
+			t.Fatal(err)
+		}
+		found = true
+		break
+	}
+	if !found {
+		t.Fatal("sdp_answer_generated log record missing")
+	}
+	for _, key := range []string{
+		"offerHasIceLite",
+		"answerHasIceLite",
+		"offerHasTrickle",
+		"answerHasTrickle",
+	} {
+		raw, exists := rawRecord[key]
+		if !exists {
+			t.Fatalf("log metadata key %q missing", key)
+		}
+		var value bool
+		if err := json.Unmarshal(raw, &value); err != nil {
+			t.Fatalf("log metadata key %q is not a boolean: %v", key, err)
+		}
+	}
+	for _, key := range []string{"offerBundleMids", "answerBundleMids"} {
+		raw, exists := rawRecord[key]
+		if !exists {
+			t.Fatalf("log metadata key %q missing", key)
+		}
+		var value []string
+		if string(raw) == "null" {
+			t.Fatalf("log metadata key %q is null, want string array", key)
+		}
+		if err := json.Unmarshal(raw, &value); err != nil {
+			t.Fatalf("log metadata key %q is not a string array: %v", key, err)
+		}
+	}
+	if record.SessionID != "ice-log-session" || record.OfferBytes != len(offer) || record.AnswerBytes != len(answer) {
+		t.Fatalf("existing log metadata changed: %#v", record)
+	}
+	if record.OfferHasIceLite || !record.AnswerHasIceLite {
+		t.Fatalf("ICE-Lite metadata = offer %t answer %t, want false/true", record.OfferHasIceLite, record.AnswerHasIceLite)
+	}
+	if !record.OfferHasTrickle || record.AnswerHasTrickle {
+		t.Fatalf("trickle metadata = offer %t answer %t, want true/false", record.OfferHasTrickle, record.AnswerHasTrickle)
+	}
+	if !equalStrings(record.OfferBundleMIDs, []string{"0"}) || !equalStrings(record.AnswerBundleMIDs, []string{"0"}) {
+		t.Fatalf("BUNDLE MIDs = offer %q answer %q, want [0]/[0]", record.OfferBundleMIDs, record.AnswerBundleMIDs)
+	}
+	serializedLogs := logs.String()
+	for _, forbidden := range []string{
+		"a=ice-lite",
+		"a=ice-options:",
+		"a=group:BUNDLE",
+		"a=candidate:",
+		"a=ice-ufrag:",
+		"a=ice-pwd:",
+		"a=fingerprint:",
+	} {
+		if strings.Contains(serializedLogs, forbidden) {
+			t.Fatalf("logs contain forbidden SDP content %q", forbidden)
+		}
 	}
 }
 
