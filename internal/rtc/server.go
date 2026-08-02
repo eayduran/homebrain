@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -158,7 +159,8 @@ func (s *Server) NewSession(ctx context.Context, id, offer string, onTerminal fu
 			_ = session.Close()
 			return nil, "", errors.New("local description missing after ICE gathering")
 		}
-		normalizedAnswer := normalizeAlexaRejectedVideoPayloads(offer, local.SDP)
+		videoNormalizedAnswer := normalizeAlexaRejectedVideoPayloads(offer, local.SDP)
+		normalizedAnswer := normalizeAlexaRTCPMuxCandidates(videoNormalizedAnswer)
 		s.logger.Info("sdp_answer_generated", "sessionId", id, "offerBytes", len(offer), "answerBytes", len(normalizedAnswer))
 		s.logger.Info("session_created", "sessionId", id)
 		return session, normalizedAnswer, nil
@@ -166,6 +168,70 @@ func (s *Server) NewSession(ctx context.Context, id, offer string, onTerminal fu
 		_ = session.Close()
 		return nil, "", fmt.Errorf("%w: %v", ErrAnswerTimeout, deadlineCtx.Err())
 	}
+}
+
+// normalizeAlexaRTCPMuxCandidates is an Alexa interoperability boundary,
+// not generic SDP normalization.
+func normalizeAlexaRTCPMuxCandidates(answer string) string {
+	lineSeparator := "\n"
+	if strings.Contains(answer, "\r\n") {
+		lineSeparator = "\r\n"
+	}
+	lines := strings.Split(answer, lineSeparator)
+	remove := make([]bool, len(lines))
+	for sectionStart := 0; sectionStart < len(lines); sectionStart++ {
+		if !strings.HasPrefix(lines[sectionStart], "m=") {
+			continue
+		}
+		sectionEnd := sectionStart + 1
+		for sectionEnd < len(lines) && !strings.HasPrefix(lines[sectionEnd], "m=") {
+			sectionEnd++
+		}
+
+		mediaFields := strings.Fields(lines[sectionStart])
+		if len(mediaFields) < 2 || mediaFields[0] != "m=audio" {
+			continue
+		}
+		port, err := strconv.Atoi(mediaFields[1])
+		if err != nil || port <= 0 {
+			continue
+		}
+		hasRTCPMux := false
+		for lineIndex := sectionStart + 1; lineIndex < sectionEnd; lineIndex++ {
+			if lines[lineIndex] == "a=rtcp-mux" {
+				hasRTCPMux = true
+				break
+			}
+		}
+		if !hasRTCPMux {
+			continue
+		}
+		for lineIndex := sectionStart + 1; lineIndex < sectionEnd; lineIndex++ {
+			if !strings.HasPrefix(lines[lineIndex], "a=candidate:") {
+				continue
+			}
+			candidateFields := strings.Fields(lines[lineIndex])
+			if len(candidateFields) < 2 || candidateFields[1] != "2" {
+				continue
+			}
+			if candidateFields[0] == "a=candidate:" {
+				continue
+			}
+			candidateForValidation := strings.TrimPrefix(strings.Join(candidateFields, " "), "a=")
+			if _, err := ice.UnmarshalCandidate(candidateForValidation); err != nil {
+				continue
+			}
+			remove[lineIndex] = true
+		}
+	}
+
+	normalized := make([]string, 0, len(lines))
+	for lineIndex, line := range lines {
+		if !remove[lineIndex] {
+			normalized = append(normalized, line)
+		}
+	}
+	return strings.Join(normalized, lineSeparator)
 }
 
 // normalizeAlexaRejectedVideoPayloads is an Alexa interoperability boundary,

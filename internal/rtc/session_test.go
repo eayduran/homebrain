@@ -467,6 +467,209 @@ func TestAlexaRejectedVideoPayloadNormalizationPreservesAudioAndCandidates(t *te
 	}
 }
 
+func TestAlexaRTCPMuxCandidateNormalizationFromPionAnswer(t *testing.T) {
+	rawAnswer := newPionAnswerWithRTCPMuxCandidates(t)
+	rawCandidates := candidateLinesInFirstAudioSection(t, rawAnswer)
+	component1 := candidateLinesForComponent(rawCandidates, "1")
+	component2 := candidateLinesForComponent(rawCandidates, "2")
+	if len(component1) != 1 || len(component2) != 1 {
+		t.Fatalf("real Pion answer candidates = component-1 %d, component-2 %d; want exactly one each\n%s", len(component1), len(component2), rawAnswer)
+	}
+
+	normalized := normalizeAlexaRTCPMuxCandidates(rawAnswer)
+	normalizedCandidates := candidateLinesInFirstAudioSection(t, normalized)
+	if got := candidateLinesForComponent(normalizedCandidates, "1"); !equalStrings(got, component1) {
+		t.Fatalf("component-1 candidate changed: got %q want %q", got, component1)
+	}
+	if got := candidateLinesForComponent(normalizedCandidates, "2"); len(got) != 0 {
+		t.Fatalf("component-2 candidates remain after Alexa normalization: %q", got)
+	}
+	want := strings.Replace(rawAnswer, component2[0]+"\r\n", "", 1)
+	if normalized != want {
+		t.Fatalf("Alexa RTCP-mux normalization changed bytes other than the component-2 line\nwant:\n%s\ngot:\n%s", want, normalized)
+	}
+}
+
+func TestAlexaRTCPMuxCandidateNormalizationPreservesFramingAndOtherSections(t *testing.T) {
+	inputLines := []string{
+		"v=0",
+		"a=group:BUNDLE 0 1 2 3",
+		"m=audio 40000 UDP/TLS/RTP/SAVPF 111",
+		"a=mid:0",
+		"a=rtcp-mux",
+		"a=candidate:first\t1 udp 100 203.0.113.1 40000 typ host generation 0",
+		"a=candidate:dropone  2 udp 90 203.0.113.1 40001 typ host",
+		"a=candidate:second 1 UDP 80 203.0.113.2 40002 typ srflx raddr 10.0.0.1 rport 5000",
+		"a=candidate:droptwo\t2\tudp 70 203.0.113.2 40003 typ host",
+		"a=candidate:not-two 12 udp 60 203.0.113.3 40004 typ host",
+		"a=candidate:also-not-two 20 udp 50 203.0.113.4 40005 typ host",
+		"a=candidate:malformed 2",
+		"a=candidate:wrongmarker 2 udp 40 203.0.113.5 40006 type host",
+		"a=ice-ufrag:unchanged",
+		"a=fingerprint:sha-256 AA:BB",
+		"m=audio 41000 UDP/TLS/RTP/SAVPF 111",
+		"a=mid:1",
+		"a=candidate:non-mux 2 udp 40 203.0.113.5 41001 typ host",
+		"m=audio 0 UDP/TLS/RTP/SAVPF 111",
+		"a=mid:2",
+		"a=rtcp-mux",
+		"a=candidate:rejected 2 udp 30 203.0.113.6 42001 typ host",
+		"m=video 0 UDP/TLS/RTP/SAVPF 102",
+		"a=mid:3",
+		"a=rtcp-mux",
+		"a=candidate:video 2 udp 20 203.0.113.7 43001 typ host",
+		"a=inactive",
+	}
+	wantLines := []string{
+		"v=0",
+		"a=group:BUNDLE 0 1 2 3",
+		"m=audio 40000 UDP/TLS/RTP/SAVPF 111",
+		"a=mid:0",
+		"a=rtcp-mux",
+		"a=candidate:first\t1 udp 100 203.0.113.1 40000 typ host generation 0",
+		"a=candidate:second 1 UDP 80 203.0.113.2 40002 typ srflx raddr 10.0.0.1 rport 5000",
+		"a=candidate:not-two 12 udp 60 203.0.113.3 40004 typ host",
+		"a=candidate:also-not-two 20 udp 50 203.0.113.4 40005 typ host",
+		"a=candidate:malformed 2",
+		"a=candidate:wrongmarker 2 udp 40 203.0.113.5 40006 type host",
+		"a=ice-ufrag:unchanged",
+		"a=fingerprint:sha-256 AA:BB",
+		"m=audio 41000 UDP/TLS/RTP/SAVPF 111",
+		"a=mid:1",
+		"a=candidate:non-mux 2 udp 40 203.0.113.5 41001 typ host",
+		"m=audio 0 UDP/TLS/RTP/SAVPF 111",
+		"a=mid:2",
+		"a=rtcp-mux",
+		"a=candidate:rejected 2 udp 30 203.0.113.6 42001 typ host",
+		"m=video 0 UDP/TLS/RTP/SAVPF 102",
+		"a=mid:3",
+		"a=rtcp-mux",
+		"a=candidate:video 2 udp 20 203.0.113.7 43001 typ host",
+		"a=inactive",
+	}
+
+	for _, tt := range []struct {
+		name         string
+		lineEnding   string
+		finalNewline bool
+	}{
+		{name: "CRLF with final newline", lineEnding: "\r\n", finalNewline: true},
+		{name: "LF without final newline", lineEnding: "\n", finalNewline: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			input := strings.Join(inputLines, tt.lineEnding)
+			want := strings.Join(wantLines, tt.lineEnding)
+			if tt.finalNewline {
+				input += tt.lineEnding
+				want += tt.lineEnding
+			}
+
+			got := normalizeAlexaRTCPMuxCandidates(input)
+			if got != want {
+				t.Fatalf("Alexa RTCP-mux normalization did not preserve framing or unrelated bytes\nwant: %q\ngot:  %q", want, got)
+			}
+			if strings.HasSuffix(got, tt.lineEnding) != tt.finalNewline {
+				t.Fatalf("final newline state changed: got suffix=%t want %t", strings.HasSuffix(got, tt.lineEnding), tt.finalNewline)
+			}
+			gotComponent1 := candidateLinesForComponent(candidateLinesInFirstAudioSection(t, got), "1")
+			wantComponent1 := []string{inputLines[5], inputLines[7]}
+			if !equalStrings(gotComponent1, wantComponent1) {
+				t.Fatalf("component-1 candidates changed or reordered: got %q want %q", gotComponent1, wantComponent1)
+			}
+			for _, removedCandidate := range []string{inputLines[6], inputLines[8]} {
+				if strings.Contains(got, removedCandidate) {
+					t.Fatalf("valid component-2 candidate remains in accepted muxed audio: %q", removedCandidate)
+				}
+			}
+		})
+	}
+}
+
+func newPionAnswerWithRTCPMuxCandidates(t *testing.T) string {
+	t.Helper()
+	fixture := newOffer(t, true, false)
+	mediaEngine := &webrtc.MediaEngine{}
+	opus := webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{
+			MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2,
+			SDPFmtpLine: "minptime=10;useinbandfec=1",
+		},
+		PayloadType: 111,
+	}
+	if err := mediaEngine.RegisterCodec(opus, webrtc.RTPCodecTypeAudio); err != nil {
+		t.Fatal(err)
+	}
+	settings := webrtc.SettingEngine{}
+	settings.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
+	settings.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
+	settings.SetIncludeLoopbackCandidate(true)
+	settings.SetIPFilter(func(ip net.IP) bool { return ip.To4() != nil && ip.IsLoopback() })
+	api := webrtc.NewAPI(webrtc.WithMediaEngine(mediaEngine), webrtc.WithSettingEngine(settings))
+	peer, err := api.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = peer.Close() })
+	track, err := webrtc.NewTrackLocalStaticRTP(opus.RTPCodecCapability, "speaker", "home-brain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = peer.AddTrack(track); err != nil {
+		t.Fatal(err)
+	}
+	if err = peer.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: fixture.offer}); err != nil {
+		t.Fatal(err)
+	}
+	answer, err := peer.CreateAnswer(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gathered := webrtc.GatheringCompletePromise(peer)
+	if err = peer.SetLocalDescription(answer); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-gathered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("answer ICE gathering timed out")
+	}
+	return peer.LocalDescription().SDP
+}
+
+func candidateLinesInFirstAudioSection(t *testing.T, raw string) []string {
+	t.Helper()
+	lines := strings.Split(strings.ReplaceAll(raw, "\r\n", "\n"), "\n")
+	inAudio := false
+	var candidates []string
+	for _, line := range lines {
+		if strings.HasPrefix(line, "m=") {
+			if inAudio {
+				break
+			}
+			inAudio = strings.HasPrefix(line, "m=audio ")
+			continue
+		}
+		if inAudio && strings.HasPrefix(line, "a=candidate:") {
+			candidates = append(candidates, line)
+		}
+	}
+	if !inAudio {
+		t.Fatal("SDP missing audio media section")
+	}
+	return candidates
+}
+
+func candidateLinesForComponent(candidates []string, component string) []string {
+	var matches []string
+	for _, candidate := range candidates {
+		fields := strings.Fields(candidate)
+		if len(fields) >= 2 && fields[1] == component {
+			matches = append(matches, candidate)
+		}
+	}
+	return matches
+}
+
 func mediaLine(t *testing.T, raw, kind string) string {
 	t.Helper()
 	prefix := "m=" + kind + " "
