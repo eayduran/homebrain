@@ -406,6 +406,15 @@ func TestNewSessionKeepsAudioWhenOfferContainsVideo(t *testing.T) {
 	if !strings.Contains(videoSection, "\r\na=inactive\r\n") {
 		t.Fatalf("Alexa rejected video section is not inactive:\n%s", videoSection)
 	}
+	if !strings.Contains(videoSection, "\r\na=mid:1\r\n") {
+		t.Fatalf("Alexa rejected video section is missing offered MID 1:\n%s", videoSection)
+	}
+	if audioSection := mediaSection(t, answer, "audio"); !strings.Contains(audioSection, "\r\na=mid:0\r\n") {
+		t.Fatalf("accepted audio section lost MID 0:\n%s", audioSection)
+	}
+	if got := linesWithPrefix(answer, "a=group:BUNDLE"); !equalStrings(got, []string{"a=group:BUNDLE 0"}) {
+		t.Fatalf("answer BUNDLE group = %q, want unchanged accepted MID only", got)
+	}
 	for _, sender := range session.peer.GetSenders() {
 		if track := sender.Track(); track != nil && track.Kind() == webrtc.RTPCodecTypeVideo {
 			t.Fatal("Alexa normalization unexpectedly added an active local video track")
@@ -482,6 +491,156 @@ func TestAlexaRejectedVideoPayloadNormalizationPreservesAudioAndCandidates(t *te
 	fallback := normalizeAlexaRejectedVideoPayloads(fallbackOffer, emptyPayloadAnswer)
 	if got := mediaLine(t, fallback, "video"); got != "m=video  0  UDP/TLS/RTP/SAVPF 112" {
 		t.Fatalf("fallback video m-line = %q, want first offered payload 112", got)
+	}
+}
+
+func TestAlexaRejectedMediaMIDPreservation(t *testing.T) {
+	t.Run("CRLF mixed offer preserves rejected video MID only", func(t *testing.T) {
+		offer := strings.Join([]string{
+			"v=0",
+			"a=group:BUNDLE 0 1",
+			"m=audio 9 UDP/TLS/RTP/SAVPF 111",
+			"c=IN IP4 0.0.0.0",
+			"a=mid:0",
+			"a=sendrecv",
+			"m=video 9 UDP/TLS/RTP/SAVPF 102 112",
+			"c=IN IP4 0.0.0.0",
+			"a=mid:1",
+			"a=sendrecv",
+			"",
+		}, "\r\n")
+		rawAnswer := strings.Join([]string{
+			"v=0",
+			"a=group:BUNDLE 0",
+			"m=audio 40000 UDP/TLS/RTP/SAVPF 111",
+			"c=IN IP4 203.0.113.10",
+			"a=mid:0",
+			"a=sendrecv",
+			"m=video 0 UDP/TLS/RTP/SAVPF 102",
+			"c=IN IP4 0.0.0.0",
+			"a=inactive",
+			"",
+		}, "\r\n")
+		want := strings.Join([]string{
+			"v=0",
+			"a=group:BUNDLE 0",
+			"m=audio 40000 UDP/TLS/RTP/SAVPF 111",
+			"c=IN IP4 203.0.113.10",
+			"a=mid:0",
+			"a=sendrecv",
+			"m=video 0 UDP/TLS/RTP/SAVPF 102",
+			"c=IN IP4 0.0.0.0",
+			"a=mid:1",
+			"a=inactive",
+			"",
+		}, "\r\n")
+
+		got := normalizeAlexaRejectedMediaMIDs(offer, rawAnswer)
+		if got != want {
+			t.Fatalf("Alexa rejected-media MID preservation changed unexpected bytes\nwant: %q\ngot:  %q", want, got)
+		}
+		if !strings.Contains(got, "a=group:BUNDLE 0\r\n") || strings.Contains(got, "a=group:BUNDLE 0 1\r\n") {
+			t.Fatalf("answer BUNDLE group changed:\n%s", got)
+		}
+		if gotAudio, wantAudio := mediaSection(t, got, "audio"), mediaSection(t, rawAnswer, "audio"); gotAudio != wantAudio {
+			t.Fatalf("accepted audio section changed\nwant: %q\ngot:  %q", wantAudio, gotAudio)
+		}
+	})
+
+	t.Run("LF positional matching adds several missing MIDs", func(t *testing.T) {
+		offer := strings.Join([]string{
+			"v=0",
+			"a=group:BUNDLE 0 1 2",
+			"m=audio 9 UDP/TLS/RTP/SAVPF 111",
+			"a=mid:0",
+			"m=video 9 UDP/TLS/RTP/SAVPF 102",
+			"a=mid:1",
+			"m=application 9 UDP/DTLS/SCTP webrtc-datachannel",
+			"a=mid:data-main",
+		}, "\n")
+		rawAnswer := strings.Join([]string{
+			"v=0",
+			"a=group:BUNDLE 0",
+			"m=audio 40000 UDP/TLS/RTP/SAVPF 111",
+			"a=mid:0",
+			"a=sendrecv",
+			"m=video 0 UDP/TLS/RTP/SAVPF 102",
+			"c=IN IP4 0.0.0.0",
+			"a=inactive",
+			"m=application 0 UDP/DTLS/SCTP webrtc-datachannel",
+			"a=inactive",
+		}, "\n")
+		want := strings.Join([]string{
+			"v=0",
+			"a=group:BUNDLE 0",
+			"m=audio 40000 UDP/TLS/RTP/SAVPF 111",
+			"a=mid:0",
+			"a=sendrecv",
+			"m=video 0 UDP/TLS/RTP/SAVPF 102",
+			"c=IN IP4 0.0.0.0",
+			"a=mid:1",
+			"a=inactive",
+			"m=application 0 UDP/DTLS/SCTP webrtc-datachannel",
+			"a=mid:data-main",
+			"a=inactive",
+		}, "\n")
+
+		if got := normalizeAlexaRejectedMediaMIDs(offer, rawAnswer); got != want {
+			t.Fatalf("positional MID preservation\nwant: %q\ngot:  %q", want, got)
+		}
+	})
+
+	for _, tt := range []struct {
+		name   string
+		offer  string
+		answer string
+	}{
+		{
+			name:   "existing different MID is untouched",
+			offer:  "v=0\nm=video 9 UDP/TLS/RTP/SAVPF 102\na=mid:offer-mid",
+			answer: "v=0\nm=video 0 UDP/TLS/RTP/SAVPF 102\na=mid:answer-mid\na=inactive",
+		},
+		{
+			name:   "existing empty MID is untouched",
+			offer:  "v=0\nm=video 9 UDP/TLS/RTP/SAVPF 102\na=mid:offer-mid",
+			answer: "v=0\nm=video 0 UDP/TLS/RTP/SAVPF 102\na=mid:\na=inactive",
+		},
+		{
+			name:   "positional media type mismatch is untouched",
+			offer:  "v=0\nm=audio 9 UDP/TLS/RTP/SAVPF 111\na=mid:audio-mid",
+			answer: "v=0\nm=video 0 UDP/TLS/RTP/SAVPF 102\na=inactive",
+		},
+		{
+			name:   "missing corresponding offer section is untouched",
+			offer:  "v=0\nm=audio 9 UDP/TLS/RTP/SAVPF 111\na=mid:0",
+			answer: "v=0\nm=audio 9 UDP/TLS/RTP/SAVPF 111\na=mid:0\nm=video 0 UDP/TLS/RTP/SAVPF 102\na=inactive",
+		},
+		{
+			name:   "malformed answer port is untouched",
+			offer:  "v=0\nm=video 9 UDP/TLS/RTP/SAVPF 102\na=mid:1",
+			answer: "v=0\nm=video rejected UDP/TLS/RTP/SAVPF 102\na=inactive",
+		},
+		{
+			name:   "truncated offer m-line is untouched",
+			offer:  "v=0\nm=video 9\na=mid:1",
+			answer: "v=0\nm=video 0 UDP/TLS/RTP/SAVPF 102\na=inactive",
+		},
+		{
+			name:   "invalid offer port is untouched",
+			offer:  "v=0\nm=video invalid UDP/TLS/RTP/SAVPF 102\na=mid:1",
+			answer: "v=0\nm=video 0 UDP/TLS/RTP/SAVPF 102\na=inactive",
+		},
+		{
+			name:   "truncated answer m-line is untouched",
+			offer:  "v=0\nm=video 9 UDP/TLS/RTP/SAVPF 102\na=mid:1",
+			answer: "v=0\nm=video 0\na=inactive",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := normalizeAlexaRejectedMediaMIDs(tt.offer, tt.answer); got != tt.answer {
+				t.Fatalf("no-op safety case changed answer\nwant: %q\ngot:  %q", tt.answer, got)
+			}
+		})
 	}
 }
 

@@ -160,7 +160,8 @@ func (s *Server) NewSession(ctx context.Context, id, offer string, onTerminal fu
 			return nil, "", errors.New("local description missing after ICE gathering")
 		}
 		videoNormalizedAnswer := normalizeAlexaRejectedVideoPayloads(offer, local.SDP)
-		normalizedAnswer := normalizeAlexaRTCPMuxCandidates(videoNormalizedAnswer)
+		midNormalizedAnswer := normalizeAlexaRejectedMediaMIDs(offer, videoNormalizedAnswer)
+		normalizedAnswer := normalizeAlexaRTCPMuxCandidates(midNormalizedAnswer)
 		offerMetadata := extractICESDPLogMetadata(offer)
 		answerMetadata := extractICESDPLogMetadata(normalizedAnswer)
 		s.logger.Info(
@@ -245,6 +246,135 @@ func normalizeAlexaRTCPMuxCandidates(answer string) string {
 		}
 	}
 	return strings.Join(normalized, lineSeparator)
+}
+
+type alexaOfferMediaSection struct {
+	mediaType string
+	mid       string
+}
+
+// normalizeAlexaRejectedMediaMIDs is an Alexa rejected-media MID
+// preservation boundary, not generic SDP normalization.
+func normalizeAlexaRejectedMediaMIDs(offer, answer string) string {
+	offerSections := alexaOfferMediaSections(offer)
+	if len(offerSections) == 0 {
+		return answer
+	}
+
+	lineSeparator := "\n"
+	if strings.Contains(answer, "\r\n") {
+		lineSeparator = "\r\n"
+	}
+	lines := strings.Split(answer, lineSeparator)
+	var sectionStarts []int
+	for lineIndex, line := range lines {
+		if strings.HasPrefix(line, "m=") {
+			sectionStarts = append(sectionStarts, lineIndex)
+		}
+	}
+	if len(sectionStarts) == 0 {
+		return answer
+	}
+
+	normalized := append([]string(nil), lines[:sectionStarts[0]]...)
+	for sectionIndex, sectionStart := range sectionStarts {
+		sectionEnd := len(lines)
+		if sectionIndex+1 < len(sectionStarts) {
+			sectionEnd = sectionStarts[sectionIndex+1]
+		}
+		section := lines[sectionStart:sectionEnd]
+		insertAt := alexaRejectedMediaMIDInsertAt(section, sectionIndex, offerSections)
+		if insertAt < 0 {
+			normalized = append(normalized, section...)
+			continue
+		}
+		normalized = append(normalized, section[:insertAt]...)
+		normalized = append(normalized, "a=mid:"+offerSections[sectionIndex].mid)
+		normalized = append(normalized, section[insertAt:]...)
+	}
+	return strings.Join(normalized, lineSeparator)
+}
+
+func alexaOfferMediaSections(offer string) []alexaOfferMediaSection {
+	lineSeparator := "\n"
+	if strings.Contains(offer, "\r\n") {
+		lineSeparator = "\r\n"
+	}
+	lines := strings.Split(offer, lineSeparator)
+	var sections []alexaOfferMediaSection
+	for lineIndex := 0; lineIndex < len(lines); lineIndex++ {
+		if !strings.HasPrefix(lines[lineIndex], "m=") {
+			continue
+		}
+		section := alexaOfferMediaSection{}
+		if fields, valid := alexaMediaLineFields(lines[lineIndex]); valid {
+			section.mediaType = strings.TrimPrefix(fields[0], "m=")
+		}
+		sectionEnd := lineIndex + 1
+		for sectionEnd < len(lines) && !strings.HasPrefix(lines[sectionEnd], "m=") {
+			sectionEnd++
+		}
+		for sectionLine := lineIndex + 1; sectionLine < sectionEnd; sectionLine++ {
+			if strings.HasPrefix(lines[sectionLine], "a=mid:") {
+				section.mid = strings.TrimPrefix(lines[sectionLine], "a=mid:")
+				break
+			}
+		}
+		sections = append(sections, section)
+		lineIndex = sectionEnd - 1
+	}
+	return sections
+}
+
+func alexaRejectedMediaMIDInsertAt(section []string, sectionIndex int, offerSections []alexaOfferMediaSection) int {
+	if len(section) == 0 || sectionIndex >= len(offerSections) {
+		return -1
+	}
+	answerFields, valid := alexaMediaLineFields(section[0])
+	if !valid || answerFields[1] != "0" {
+		return -1
+	}
+	answerMediaType := strings.TrimPrefix(answerFields[0], "m=")
+	offerSection := offerSections[sectionIndex]
+	if answerMediaType == "" || answerMediaType != offerSection.mediaType || offerSection.mid == "" {
+		return -1
+	}
+	for sectionLine := 1; sectionLine < len(section); sectionLine++ {
+		if strings.HasPrefix(section[sectionLine], "a=mid:") {
+			return -1
+		}
+	}
+	for sectionLine := 1; sectionLine < len(section); sectionLine++ {
+		if strings.HasPrefix(section[sectionLine], "a=") {
+			return sectionLine
+		}
+	}
+	insertAt := len(section)
+	if insertAt > 1 && section[insertAt-1] == "" {
+		insertAt--
+	}
+	return insertAt
+}
+
+func alexaMediaLineFields(line string) ([]string, bool) {
+	fields := strings.Fields(line)
+	if len(fields) < 4 || !strings.HasPrefix(fields[0], "m=") || strings.TrimPrefix(fields[0], "m=") == "" {
+		return nil, false
+	}
+	portParts := strings.Split(fields[1], "/")
+	if len(portParts) == 0 || len(portParts) > 2 || portParts[0] == "" {
+		return nil, false
+	}
+	if _, err := strconv.ParseUint(portParts[0], 10, 16); err != nil {
+		return nil, false
+	}
+	if len(portParts) == 2 {
+		portCount, err := strconv.ParseUint(portParts[1], 10, 32)
+		if err != nil || portCount == 0 {
+			return nil, false
+		}
+	}
+	return fields, true
 }
 
 type iceSDPLogMetadata struct {
