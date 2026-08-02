@@ -40,6 +40,7 @@ func run(ctx context.Context, getenv func(string) string) error {
 		ICELite:            cfg.ICELite,
 		AudioPrimeEnabled:  cfg.AudioPrimeEnabled,
 		AudioPrimeDuration: cfg.AudioPrimeDuration,
+		AudioPrimeMode:     cfg.AudioPrimeMode,
 		Recordings:         recorderFactory,
 		Logger:             logger,
 		AnswerTimeout:      4500 * time.Millisecond,

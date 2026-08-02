@@ -47,6 +47,9 @@ Tüm `/v1` istekleri `Authorization: Bearer <SESSION_API_TOKEN>` gerektirir. Bod
 | `UDP_PORT_MIN` | `40000` | ICE UDP alt portu |
 | `UDP_PORT_MAX` | `40020` | ICE UDP üst portu |
 | `ICE_LITE` | `false` | Opt-in Alexa ICE-Lite uyumluluk deneyi |
+| `RTC_AUDIO_PRIME_ENABLED` | `false` | Opt-in outbound Opus audio priming tanısı |
+| `RTC_AUDIO_PRIME_DURATION` | `10s` | Priming süresi; pozitif 20 ms katı |
+| `RTC_AUDIO_PRIME_MODE` | `silence` | Priming payload modu: `silence` veya development-time pre-encoded `tone` |
 | `SESSION_API_TOKEN` | Yok | Zorunlu güçlü bearer token |
 | `RECORDINGS_DIR` | `/data/recordings` | Yazılabilir OGG dizini |
 | `SESSION_TTL` | `10m` | Otomatik oturum cleanup süresi |
@@ -55,6 +58,8 @@ Tüm `/v1` istekleri `Authorization: Bearer <SESSION_API_TOKEN>` gerektirir. Bod
 Servis başlangıçta public IPv4'ü, port sırasını, token'ı, TTL'yi ve kayıt dizininin oluşturulup yazılabilir olmasını doğrular. `.env.example` içindeki `203.0.113.10` RFC 5737 dokümantasyon adresidir ve servis tarafından bilerek reddedilir; gerçek VPS IPv4'ünüzle değiştirin.
 
 `ICE_LITE` varsayılan olarak kesinlikle kapalıdır ve normal full-ICE davranışı korunur. Yalnız Alexa cihaz/firmware birlikte çalışabilirliğini denemek için deployment `.env` dosyasında açıkça `ICE_LITE=true` ayarlayın. Bu seçenek genel SDP veya ağ davranışı önerisi değildir.
+
+Outbound audio priming de varsayılan olarak kapalıdır. `RTC_AUDIO_PRIME_ENABLED=true` yalnız Alexa medya yolu tanısı için mevcut negotiated Opus track üzerinden paket gönderir; `silence` mevcut sessiz payload davranışını, `tone` ise runtime encoder gerektirmeyen gömülü 440 Hz Opus test tonunu kullanır.
 
 Token üretin:
 

@@ -25,6 +25,7 @@ type Session struct {
 	disconnectGrace     time.Duration
 	audioPrimeEnabled   bool
 	audioPrimeDuration  time.Duration
+	audioPrimeMode      string
 	audioPrimeWriter    audioPrimeWriter
 	newAudioPrimeTicker func(time.Duration) audioPrimeTicker
 
@@ -171,21 +172,28 @@ func (s *Session) startAudioPrime() {
 		s.stateMu.Unlock()
 
 		ticker := s.newAudioPrimeTicker(audioPrimeFrameDuration)
-		s.logger.Info("audio_prime_started", "sessionId", s.id)
+		s.logger.Info("audio_prime_started", "sessionId", s.id, "mode", s.audioPrimeMode)
 		go func() {
 			frames, reason, err := runAudioPrime(
 				primeCtx,
 				s.audioPrimeWriter,
 				ticker,
 				int(s.audioPrimeDuration/audioPrimeFrameDuration),
+				audioPrimeFramesForMode(s.audioPrimeMode),
 			)
 			if err != nil {
-				s.logger.Error("audio_prime_failed", "sessionId", s.id, "category", "write")
+				s.logger.Error(
+					"audio_prime_failed",
+					"sessionId", s.id,
+					"mode", s.audioPrimeMode,
+					"category", "write",
+				)
 				return
 			}
 			s.logger.Info(
 				"audio_prime_completed",
 				"sessionId", s.id,
+				"mode", s.audioPrimeMode,
 				"frames", frames,
 				"reason", string(reason),
 			)

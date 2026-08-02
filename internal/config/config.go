@@ -13,14 +13,15 @@ import (
 )
 
 const (
-	defaultHTTPAddr     = ":8080"
-	defaultUDPPortMin   = uint16(40000)
-	defaultUDPPortMax   = uint16(40020)
-	defaultRecordings   = "/data/recordings"
-	defaultSessionTTL   = 10 * time.Minute
-	defaultAudioPrime   = 10 * time.Second
-	audioPrimeFrame     = 20 * time.Millisecond
-	defaultLogLevelName = "info"
+	defaultHTTPAddr       = ":8080"
+	defaultUDPPortMin     = uint16(40000)
+	defaultUDPPortMax     = uint16(40020)
+	defaultRecordings     = "/data/recordings"
+	defaultSessionTTL     = 10 * time.Minute
+	defaultAudioPrime     = 10 * time.Second
+	defaultAudioPrimeMode = "silence"
+	audioPrimeFrame       = 20 * time.Millisecond
+	defaultLogLevelName   = "info"
 )
 
 type Config struct {
@@ -35,6 +36,7 @@ type Config struct {
 	ICELite            bool
 	AudioPrimeEnabled  bool
 	AudioPrimeDuration time.Duration
+	AudioPrimeMode     string
 }
 
 func Load(getenv func(string) string) (Config, error) {
@@ -93,6 +95,10 @@ func Load(getenv func(string) string) (Config, error) {
 			return Config{}, errors.New("RTC_AUDIO_PRIME_DURATION must be a positive multiple of 20ms")
 		}
 	}
+	audioPrimeMode := valueOr(getenv("RTC_AUDIO_PRIME_MODE"), defaultAudioPrimeMode)
+	if audioPrimeMode != "silence" && audioPrimeMode != "tone" {
+		return Config{}, errors.New("RTC_AUDIO_PRIME_MODE must be silence or tone")
+	}
 
 	return Config{
 		HTTPAddr:           valueOr(getenv("HTTP_ADDR"), defaultHTTPAddr),
@@ -106,6 +112,7 @@ func Load(getenv func(string) string) (Config, error) {
 		ICELite:            iceLite,
 		AudioPrimeEnabled:  audioPrimeEnabled,
 		AudioPrimeDuration: audioPrimeDuration,
+		AudioPrimeMode:     audioPrimeMode,
 	}, nil
 }
 

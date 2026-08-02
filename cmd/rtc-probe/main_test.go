@@ -592,7 +592,6 @@ func TestMixedOfferProductionAnswerAppliesToOfferer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create mixed offer: %v", err)
 	}
-
 	server, err := rtc.NewServer(rtc.Options{
 		PublicIP:        net.ParseIP("127.0.0.1"),
 		UDPPortMin:      46200,
@@ -636,6 +635,15 @@ func TestMixedOfferProductionAnswerAppliesToOfferer(t *testing.T) {
 }
 
 func TestMixedOfferProductionAudioPrimeProducesOpusRTP(t *testing.T) {
+	testMixedOfferProductionAudioPrimeProducesOpusRTP(t, "silence", true)
+}
+
+func TestMixedOfferProductionAudioPrimeToneProducesOpusRTP(t *testing.T) {
+	testMixedOfferProductionAudioPrimeProducesOpusRTP(t, "tone", false)
+}
+
+func testMixedOfferProductionAudioPrimeProducesOpusRTP(t *testing.T, mode string, wantSilence bool) {
+	t.Helper()
 	probe, err := newPionProbe(probeOptions{includeVideo: true}, io.Discard)
 	if err != nil {
 		t.Fatalf("new mixed probe: %v", err)
@@ -664,6 +672,9 @@ func TestMixedOfferProductionAudioPrimeProducesOpusRTP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create mixed offer: %v", err)
 	}
+	if got := countAllSDPMediaSections(offer); got != 2 {
+		t.Fatalf("mixed offer media section count = %d, want exactly 2", got)
+	}
 
 	server, err := rtc.NewServer(rtc.Options{
 		PublicIP:           net.ParseIP("127.0.0.1"),
@@ -671,6 +682,7 @@ func TestMixedOfferProductionAudioPrimeProducesOpusRTP(t *testing.T) {
 		UDPPortMax:         46410,
 		AudioPrimeEnabled:  true,
 		AudioPrimeDuration: 40 * time.Millisecond,
+		AudioPrimeMode:     mode,
 		Recordings:         recording.NewFactory(t.TempDir(), time.Now),
 		Logger:             slog.New(slog.NewTextHandler(io.Discard, nil)),
 		AnswerTimeout:      5 * time.Second,
@@ -687,6 +699,9 @@ func TestMixedOfferProductionAudioPrimeProducesOpusRTP(t *testing.T) {
 
 	if got := countSDPMediaSections(answer, "audio"); got != 1 {
 		t.Fatalf("answer audio m-line count = %d, want 1", got)
+	}
+	if got := countAllSDPMediaSections(answer); got != 2 {
+		t.Fatalf("answer media section count = %d, want exactly 2", got)
 	}
 	audioFields := strings.Fields(sdpMediaSection(t, answer, "audio")[0])
 	if len(audioFields) != 4 || audioFields[1] == "0" || audioFields[3] != "111" {
@@ -718,8 +733,9 @@ func TestMixedOfferProductionAudioPrimeProducesOpusRTP(t *testing.T) {
 		if packet.PayloadType != 111 {
 			t.Fatalf("packet %d payload type = %d, want 111", packetIndex, packet.PayloadType)
 		}
-		if got, want := packet.Payload, []byte{0xf8, 0xff, 0xfe}; !bytes.Equal(got, want) {
-			t.Fatalf("packet %d payload = %x, want %x", packetIndex, got, want)
+		isSilence := bytes.Equal(packet.Payload, []byte{0xf8, 0xff, 0xfe})
+		if isSilence != wantSilence {
+			t.Fatalf("packet %d silence=%t, want %t (payload length=%d)", packetIndex, isSilence, wantSilence, len(packet.Payload))
 		}
 	}
 	if got := packets[1].Timestamp - packets[0].Timestamp; got != 960 {
@@ -736,6 +752,16 @@ func countSDPMediaSections(raw, media string) int {
 	count := 0
 	for _, line := range strings.Split(strings.ReplaceAll(raw, "\r\n", "\n"), "\n") {
 		if strings.HasPrefix(line, "m="+media+" ") {
+			count++
+		}
+	}
+	return count
+}
+
+func countAllSDPMediaSections(raw string) int {
+	count := 0
+	for _, line := range strings.Split(strings.ReplaceAll(raw, "\r\n", "\n"), "\n") {
+		if strings.HasPrefix(line, "m=") {
 			count++
 		}
 	}

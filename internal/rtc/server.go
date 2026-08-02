@@ -30,6 +30,7 @@ type Options struct {
 	ICELite            bool
 	AudioPrimeEnabled  bool
 	AudioPrimeDuration time.Duration
+	AudioPrimeMode     string
 	Recordings         recording.Factory
 	Logger             *slog.Logger
 	AnswerTimeout      time.Duration
@@ -44,6 +45,7 @@ type Server struct {
 	disconnectGrace    time.Duration
 	audioPrimeEnabled  bool
 	audioPrimeDuration time.Duration
+	audioPrimeMode     string
 }
 
 func NewServer(opts Options) (*Server, error) {
@@ -70,6 +72,12 @@ func NewServer(opts Options) (*Server, error) {
 	}
 	if opts.AudioPrimeDuration < audioPrimeFrameDuration || opts.AudioPrimeDuration%audioPrimeFrameDuration != 0 {
 		return nil, errors.New("audio prime duration must be a positive multiple of 20ms")
+	}
+	if opts.AudioPrimeMode == "" {
+		opts.AudioPrimeMode = audioPrimeModeSilence
+	}
+	if opts.AudioPrimeMode != audioPrimeModeSilence && opts.AudioPrimeMode != audioPrimeModeTone {
+		return nil, errors.New("audio prime mode must be silence or tone")
 	}
 
 	mediaEngine := &webrtc.MediaEngine{}
@@ -109,6 +117,7 @@ func NewServer(opts Options) (*Server, error) {
 		disconnectGrace:    opts.DisconnectGrace,
 		audioPrimeEnabled:  opts.AudioPrimeEnabled,
 		audioPrimeDuration: opts.AudioPrimeDuration,
+		audioPrimeMode:     opts.AudioPrimeMode,
 	}, nil
 }
 
@@ -141,6 +150,7 @@ func (s *Server) NewSession(ctx context.Context, id, offer string, onTerminal fu
 		id: id, peer: peer, cancel: cancel, ctx: sessionCtx, logger: s.logger,
 		onTerminal: onTerminal, recordings: s.recordings, disconnectGrace: s.disconnectGrace,
 		audioPrimeEnabled: s.audioPrimeEnabled, audioPrimeDuration: s.audioPrimeDuration,
+		audioPrimeMode:   s.audioPrimeMode,
 		audioPrimeWriter: localTrack, newAudioPrimeTicker: newWallClockAudioPrimeTicker,
 	}
 	session.configurePeerCallbacks()

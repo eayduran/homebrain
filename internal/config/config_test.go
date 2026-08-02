@@ -50,6 +50,9 @@ func TestLoadAppliesDefaultsAndParsesValues(t *testing.T) {
 	if got.AudioPrimeDuration != 10*time.Second {
 		t.Fatalf("RTC_AUDIO_PRIME_DURATION default = %s, want 10s", got.AudioPrimeDuration)
 	}
+	if got.AudioPrimeMode != "silence" {
+		t.Fatalf("RTC_AUDIO_PRIME_MODE default = %q, want silence", got.AudioPrimeMode)
+	}
 }
 
 func TestLoadParsesICELite(t *testing.T) {
@@ -69,6 +72,7 @@ func TestLoadParsesAudioPrime(t *testing.T) {
 	env := validEnv(t)
 	env["RTC_AUDIO_PRIME_ENABLED"] = "true"
 	env["RTC_AUDIO_PRIME_DURATION"] = "40ms"
+	env["RTC_AUDIO_PRIME_MODE"] = "tone"
 
 	got, err := Load(envGetter(env))
 	if err != nil {
@@ -79,6 +83,9 @@ func TestLoadParsesAudioPrime(t *testing.T) {
 	}
 	if got.AudioPrimeDuration != 40*time.Millisecond {
 		t.Fatalf("RTC_AUDIO_PRIME_DURATION = %s, want 40ms", got.AudioPrimeDuration)
+	}
+	if got.AudioPrimeMode != "tone" {
+		t.Fatalf("RTC_AUDIO_PRIME_MODE = %q, want tone", got.AudioPrimeMode)
 	}
 }
 
@@ -119,6 +126,7 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 		{"zero TTL", func(_ *testing.T, env map[string]string) { env["SESSION_TTL"] = "0s" }},
 		{"invalid ICE Lite", func(_ *testing.T, env map[string]string) { env["ICE_LITE"] = "enabled" }},
 		{"invalid audio prime enabled", func(_ *testing.T, env map[string]string) { env["RTC_AUDIO_PRIME_ENABLED"] = "enabled" }},
+		{"invalid audio prime mode", func(_ *testing.T, env map[string]string) { env["RTC_AUDIO_PRIME_MODE"] = "noise" }},
 		{"invalid audio prime duration", func(_ *testing.T, env map[string]string) { env["RTC_AUDIO_PRIME_DURATION"] = "soon" }},
 		{"zero audio prime duration", func(_ *testing.T, env map[string]string) { env["RTC_AUDIO_PRIME_DURATION"] = "0s" }},
 		{"negative audio prime duration", func(_ *testing.T, env map[string]string) { env["RTC_AUDIO_PRIME_DURATION"] = "-20ms" }},
